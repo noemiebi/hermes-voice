@@ -3,3 +3,5 @@ import os
 import tempfile
 
 os.environ["AEC_STATE_PATH"] = os.path.join(tempfile.mkdtemp(prefix="hv-aec-"), "aec_state.json")
+# 음역 프로필(voice_profile.json)도 임시 경로로
+os.environ["PITCH_PROFILE_PATH"] = os.path.join(tempfile.mkdtemp(prefix="hv-pitch-"), "voice_profile.json")

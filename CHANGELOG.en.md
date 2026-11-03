@@ -9,6 +9,9 @@ What changed in each version, and why. Each entry follows symptom → cause → 
 **Removed background playback keep-alive**
 The "Keep playing when the screen is off" attempt from 0.6.8 (a silent audio loop during conversations plus lock-screen media info) has been removed. It felt odd in real use, and the silent `<audio>` element risked side effects on the iOS audio session, so the feature is gone entirely, along with its settings toggle. The rest of 0.6.8 stays: no mic track re-acquisition during playback or within 3 s after it ends, and the `q=`/`rx=`/`out=`/`vis=`/`focus=` diagnostics and page-state logging.
 
+**Telling my own voice apart by pitch (server)**
+When the mic picked up speech during an answer, the server ran a duck test (dropping the volume to 20%) to tell echo from the user, and the volume dipped every time. The user's voice (median F0 about 109 Hz) and Supertonic F1 (about 218 Hz) are almost an octave apart, so the server now checks the pitch of the first 400 ms first. In the TTS range it keeps playing without ducking (the end-of-utterance text check stays, and it checks once more if the speech runs past 900 ms); in the user's range it barges in right away. Ambiguous cases fall back to the duck test as before. The TTS range is measured at server start by synthesizing four sentences in the current voice; the user range is built from transcribed utterances that did not overlap playback and kept in `voice_profile.json`. It is not used until 5 user utterances are collected. `PITCH_GATE=0` disables it.
+
 ## 0.6.8 (2026-11-03) — app v50
 
 **Audio kept cutting out during playback**

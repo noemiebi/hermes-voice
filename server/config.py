@@ -167,3 +167,18 @@ VOICE_INPUT_LOG = os.environ.get("VOICE_INPUT_LOG", "") not in ("", "0", "false"
 PORT = int(os.environ.get("PORT", "8480"))
 HOST = os.environ.get("HOST", "127.0.0.1")
 WEB_DIR = ROOT / "web"
+
+# ---------- 음높이(F0)로 자기 목소리 판별(server/pitch.py) ----------
+# 재생 중 말 시작 앞부분 F0가 TTS 음역이면 에코(덕킹 생략), 사용자 음역이면 바로 끼어들기, 모르면 기존 경로. 0이면 끔
+PITCH_GATE = os.environ.get("PITCH_GATE", "1").strip().lower() not in ("", "0", "false", "no", "off")
+# 음역 프로필 파일(빈 값이면 VOICE_DATA_DIR/voice_profile.json, off면 저장·로드 안 함)
+PITCH_PROFILE_PATH = os.environ.get("PITCH_PROFILE_PATH") or str(VOICE_DATA_DIR / "voice_profile.json")
+PITCH_ONSET_MS = int(os.environ.get("PITCH_ONSET_MS", "400"))      # 말 앞부분 이만큼 모아서 판정(최대 이만큼 기다림)
+PITCH_PREROLL_MS = int(os.environ.get("PITCH_PREROLL_MS", "64"))   # 시작 판정 구간 앞에 더 붙이는 시간(VAD 지연 보정)
+PITCH_RECHECK_MS = int(os.environ.get("PITCH_RECHECK_MS", "900"))  # TTS 판정 발화가 이보다 길면 한 번 더 판정
+PITCH_MIN_FRAMES = int(os.environ.get("PITCH_MIN_FRAMES", "12"))   # 유효(유성음) 10 ms 창이 이보다 적으면 unknown
+PITCH_USER_MIN_UTTS = int(os.environ.get("PITCH_USER_MIN_UTTS", "5"))  # 사용자 발화가 이만큼 쌓여야 판정에 씀
+PITCH_MARGIN = float(os.environ.get("PITCH_MARGIN", "2.5"))        # 판정 구간 = 중앙 ± PITCH_MARGIN × MAD(로그 F0)
+PITCH_MIN_WIDTH = float(os.environ.get("PITCH_MIN_WIDTH", "0.15"))  # 판정 구간 최소 반폭(±15%)
+PITCH_MIN_DB = float(os.environ.get("PITCH_MIN_DB", "-45"))        # 이보다 작은 창(RMS dBFS)은 F0 추정에서 뺌
+PITCH_SAVE_INTERVAL_S = float(os.environ.get("PITCH_SAVE_INTERVAL_S", "60"))  # 프로필 저장 최소 간격

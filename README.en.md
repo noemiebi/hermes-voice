@@ -201,6 +201,7 @@ Path variables fall back to their defaults when left empty.
 | `SMART_TURN_THRESHOLD` | `0.5` | smart-turn completion probability threshold |
 | `SMART_TURN_MODEL` | `models/smart-turn-v3.2-cpu.onnx` | Model path (if missing, logs a warning and uses the silence rule only) |
 | `SILERO_VAD_MODEL` | the installed `silero_vad/data/silero_vad.onnx` | VAD model path |
+| `PITCH_GATE` | `1` | When speech starts during playback, look at the pitch (F0) of its first 400 ms: in the TTS voice's range it is treated as echo and the duck test is skipped; in the user's range it barges in right away (voice profile in `VOICE_DATA_DIR/voice_profile.json`, used after 5 user utterances). `0` disables |
 | `DUCK_SKIP_CORR` | `0.7` | When speech starts during playback and the median echo-gate corr of recent windows is at least this (and the level condition holds), treat it as certain echo and keep playing without the duck test. `0` disables |
 | `DUCK_SKIP_LEVEL_DB` | `4` | Level condition for skipping the duck: median mic_db of recent windows must be at most median expected_db + this |
 

@@ -20,6 +20,7 @@ from .aec_gate import AecStateStore, EchoGate, PlaybackTimeline, ReferenceBuffer
 from .echo import EchoMemory
 from .hermes import HermesClient, HermesError, new_session_id
 from .history import HistoryStore
+from . import pitch as pitchmod
 from .sentences import SentenceSplitter
 from .stt import STTEngine
 from .tts import SAMPLE_RATE as OUT_RATE, TTSEngine
@@ -153,7 +154,7 @@ def session_is_idle(session_id: Optional[str], now: Optional[float] = None,
 
 class VoiceSession:
     def __init__(self, ws: WebSocket, stt: STTEngine, tts: TTSEngine, hermes: HermesClient,
-                 store: Optional[HistoryStore] = None):
+                 store: Optional[HistoryStore] = None, pitch_store: Optional["pitchmod.VoiceProfileStore"] = None):
         self.ws, self.stt, self.tts, self.hermes = ws, stt, tts, hermes
         self.store = store                # 화면 대화 기록·마지막 세션(server/history.py). None이면 기록 안 함
         self.session_id: Optional[str] = None
@@ -236,6 +237,13 @@ class VoiceSession:
         self._echo_task: Optional[asyncio.Task] = None  # 재생 중 끝난 에코 검사 대상 발화의 받아쓰기 판정
         self._echo_pcm = b""
         self.style_note = config.VOICE_STYLE_NOTE
+        # 음높이(F0)로 자기 목소리 판별(server/pitch.py): 앱 전체 프로필 하나
+        self.pitch_store = pitch_store if pitch_store is not None else pitchmod.get_store()
+        self.pitch_gate = config.PITCH_GATE
+        self._mic_pcm = np.zeros(0, dtype=np.int16)  # 마이크 PCM 최근 3초(말 시작 앞부분 F0 판정용)
+        self._mic_n = 0                   # 지금까지 받은 마이크 샘플 수
+        self._pitch_wait: Optional[dict] = None  # 말 시작 뒤 F0 판정 대기 {"at", "n0", "have"(샘플), "gen"}
+        self._pitch_tts: Optional[dict] = None   # TTS 음역으로 판정해 재생을 유지한 발화 {"at", "n", "gen", "rechecked"}
 
     # ---------- 송신 ----------
     async def send_json(self, obj: dict) -> None:
@@ -331,6 +339,10 @@ class VoiceSession:
             self._record_mic(data)
             for ev in self.endpointer.feed(data):
                 await self._on_vad(ev)
+            if self._pitch_wait is not None:
+                await self._pitch_poll()
+            if self._pitch_tts is not None:
+                await self._pitch_recheck()
             if self.holding and self._duck is not None:
                 await self._check_duck()
             await self._check_duck_echo()
@@ -344,9 +356,12 @@ class VoiceSession:
     # ---------- 덕킹 능동 검사 ----------
     def _record_mic(self, data: bytes) -> None:
         """마이크 32 ms 창별 평균 제곱을 도착 시각 기준으로 기록(덕킹 검사용, 최근 3초)."""
-        a = np.frombuffer(data[: len(data) // 2 * 2], dtype="<i2").astype(np.float64) / 32768.0
+        raw = np.frombuffer(data[: len(data) // 2 * 2], dtype="<i2")
+        a = raw.astype(np.float64) / 32768.0
         if a.size == 0:
             return
+        self._mic_pcm = np.concatenate([self._mic_pcm, raw])[-3 * 16000:]
+        self._mic_n += raw.size
         now = self.clock()
         n = (a.size + 511) // 512
         for k in range(n):
@@ -618,6 +633,96 @@ class VoiceSession:
             await self._hold()
             await self.set_state("listening")
 
+    # ---------- 음높이(F0) 판별 ----------
+    def _pitch_usable(self) -> bool:
+        return self.pitch_gate and self.pitch_store is not None and self.pitch_store.profile.ready()
+
+    def _pitch_classify(self, n_samples: int) -> tuple[str, float, Optional[float], int]:
+        """마이크 최근 n_samples(+ PITCH_PREROLL_MS)의 F0 분류. (판정, score, F0 중앙 Hz, 유효 창 수)."""
+        n = min(self._mic_pcm.size, max(0, n_samples) + config.PITCH_PREROLL_MS * 16)
+        f0 = pitchmod.f0_track(self._mic_pcm[-n:]) if n > 0 else np.zeros(0)
+        label, score = self.pitch_store.profile.classify(f0)
+        return label, score, pitchmod.median_hz(f0), int(f0.size)
+
+    async def _pitch_poll(self) -> None:
+        """말 시작 뒤: 앞부분이 PITCH_ONSET_MS 모이면(또는 시작 뒤 PITCH_ONSET_MS가 지나면) 한 번 판정.
+        tts -> 덕킹 생략(재생 유지, 말 끝 텍스트 대조), user -> 바로 끼어들기, unknown -> 기존 경로(_sure_echo/hold)."""
+        w = self._pitch_wait
+        ep = self.endpointer
+        if w is None:
+            return
+        if w["gen"] != self.generation or self.holding or ep is None or not ep.in_speech:
+            self._pitch_wait = None
+            return
+        have = w["have"] + (self._mic_n - w["n0"])
+        if have < config.PITCH_ONSET_MS * 16 and self.clock() - w["at"] < config.PITCH_ONSET_MS / 1000:
+            return
+        self._pitch_wait = None
+        t = time.perf_counter()
+        label, score, hz, nf = self._pitch_classify(have)
+        f0s = f"f0 ~{hz:.0f} Hz" if hz else "f0 없음"
+        pms = (time.perf_counter() - t) * 1000
+        if label == "tts":
+            log.info("음높이: TTS 음역(%s, %d창, score %.2f, %.0f ms) -> 에코로 보고 덕킹 생략", f0s, nf, score, pms)
+            self._echo_check = True
+            self._pitch_tts = {"at": w["at"], "n": self._mic_n, "gen": self.generation, "rechecked": False}
+            return
+        if label == "user":
+            log.info("음높이: 사용자 음역(%s, %d창, score %.2f, %.0f ms) -> 끼어들기", f0s, nf, score, pms)
+            await self.interrupt(announce=False, notify=True)
+            await self.set_state("listening")
+            return
+        log.info("음높이: 판정 보류(%s, %d창, %.0f ms) -> 기존 경로", f0s, nf, pms)
+        if self._playing() or self.clock() < self._tail_until:
+            if self._sure_echo():
+                log.info("확실한 에코 -> 덕킹 생략 (%s)", self._gate_desc())
+                self._echo_check = True
+                self._duck_skip = {"at": self.clock(), "nonecho": 0}
+                return
+            await self._hold()
+        await self.set_state("listening")
+
+    async def _pitch_recheck(self) -> None:
+        """TTS 음역으로 보고 재생을 유지한 발화가 PITCH_RECHECK_MS 넘게 이어지면 첫 판정 뒤 소리로 한 번 더:
+        사용자 음역이면 끼어들기."""
+        d = self._pitch_tts
+        ep = self.endpointer
+        if d is None:
+            return
+        if d["gen"] != self.generation or self.holding or ep is None or not ep.in_speech:
+            self._pitch_tts = None
+            return
+        if d["rechecked"] or self.clock() - d["at"] < config.PITCH_RECHECK_MS / 1000:
+            return
+        d["rechecked"] = True
+        label, score, hz, nf = self._pitch_classify(self._mic_n - d["n"])
+        f0s = f"f0 ~{hz:.0f} Hz" if hz else "f0 없음"
+        if label == "user":
+            log.info("음높이 재검사: 말이 %d ms 넘게 이어지고 사용자 음역(%s, %d창) -> 끼어들기",
+                     config.PITCH_RECHECK_MS, f0s, nf)
+            self._pitch_tts = None
+            await self.interrupt(announce=False, notify=True)
+            await self.set_state("listening")
+            return
+        log.info("음높이 재검사: %s(%s, %d창) -> 재생 유지(말 끝에 대조)", label, f0s, nf)
+
+    def _pitch_learn_user(self, pcm: bytes) -> None:
+        """받아쓰기로 턴이 된 사용자 발화의 F0를 user 분포에 더한다(워커 스레드, 저장은 60초에 한 번 이하)."""
+        if not self.pitch_gate or self.pitch_store is None or not pcm:
+            return
+        store = self.pitch_store
+
+        def job() -> None:
+            try:
+                if store.profile.add_user(pitchmod.f0_track(pcm)):
+                    store.save()
+            except Exception:  # noqa: BLE001
+                log.exception("음역 학습(user) 실패")
+        try:
+            asyncio.get_running_loop().run_in_executor(None, job)
+        except RuntimeError:
+            job()
+
     def _gate_echo(self, ev: VADEvent) -> bool:
         """발화의 음성 창 중 에코 우세 비율이 ECHO_GATE_FRAC 이상이면 True(받아쓰기 없이 에코)."""
         return ev.echo_judged >= ECHO_GATE_MIN_JUDGED and ev.echo_frac >= ECHO_GATE_FRAC
@@ -741,6 +846,7 @@ class VoiceSession:
             self._echo_check = self._playing() or self.clock() < self._tail_until or self._stale_playing()
             self._duck_skip = None
             self._duck_echo = None
+            self._pitch_wait = self._pitch_tts = None
             if self._echo_task is not None:
                 # 에코 판정(받아쓰기) 중 말이 다시 시작: 그 발화를 새 발화 앞에 붙이고 에코 검사 유지
                 task, self._echo_task = self._echo_task, None
@@ -779,7 +885,13 @@ class VoiceSession:
                 # 경계 시점에 일반 모드로 시작이 났어도 실제 재생 중이면 반드시 hold로 보낸다.
                 if not ev.barge:
                     log.info("일반 모드 시작이지만 재생 중 -> hold로 판정")
-                if self._sure_echo():
+                if self._pitch_usable():
+                    # 음높이 판정 먼저: 앞부분 PITCH_ONSET_MS가 모일 때까지(최대 그만큼) 재생은 그대로
+                    ep = self.endpointer
+                    self._pitch_wait = {"at": self.clock(), "n0": self._mic_n, "gen": self.generation,
+                                        "have": int(getattr(ep, "speech_ms", 0) or 0) * 16}
+                    await self._pitch_poll()
+                elif self._sure_echo():
                     # 확실한 에코: 음량을 흔들지 않고 재생 유지, 말 끝에서 대조(_gate_echo)로 판정
                     log.info("확실한 에코 -> 덕킹 생략 (%s)", self._gate_desc())
                     self._echo_check = True
@@ -794,10 +906,14 @@ class VoiceSession:
             elif ev.tail:
                 log.info("꼬리 가드 구간에서 말 시작(에코 검사 예정)")
             await self.send_json({"type": "vad", "speech": True})
-            if self._duck_skip is None:  # 덕킹 생략이면 재생이 이어지니 speaking 유지
+            if self._duck_skip is None and self._pitch_wait is None and self._pitch_tts is None:
+                # 덕킹 생략·음높이 판정 대기·TTS 음역이면 재생이 이어지니 speaking 유지
                 await self.set_state("listening")
         elif ev.kind in ("end", "discard"):
             self._duck_skip = None
+            if self._pitch_wait is not None:
+                log.info("음높이: 판정 전에 말 끝 -> 말 끝 판정으로")
+            self._pitch_wait = self._pitch_tts = None
             duck_echo, self._duck_echo = self._duck_echo, None
             await self.send_json({"type": "vad", "speech": False})
             carry, self._carry = self._carry, b""
@@ -1202,6 +1318,7 @@ class VoiceSession:
         self._clear_hold()
         self._cancel_echo_task()
         self._duck_echo = None
+        self._pitch_wait = self._pitch_tts = None
         self._stale_play = -1e9  # 클라이언트에 interrupt를 보내 옛 재생을 버림
         self.generation += 1
         self._stale_floor = self.generation
@@ -1253,6 +1370,9 @@ class VoiceSession:
                 if not text:
                     await self.set_state(self.rest_state())
                     return
+                if not echo_check:
+                    # 재생과 겹치지 않은 사용자 발화만 음역 학습(에코가 섞인 발화는 분포를 흐림)
+                    self._pitch_learn_user(pcm or b"")
             await self.set_state("thinking")
             await self._think(gen, text, t0)
         except asyncio.CancelledError:

@@ -15,6 +15,7 @@ mimetypes.add_type("audio/mp4", ".m4a")  # 기본값 audio/mp4a-latm은 iOS Safa
 from . import config
 from .hermes import HermesClient
 from .history import HistoryStore
+from . import pitch
 from .session import VoiceSession
 from .stt import STTEngine
 from .tts import TTSEngine
@@ -36,9 +37,30 @@ async def lifespan(app: FastAPI):
     # 두 모델은 서로 다른 워커 스레드에서 동시에 로드
     loads = asyncio.gather(stt.load(), tts.load())
     app.state.loading = loads
+    pstore = pitch.get_store()
+    pstore.profile.active_tts = [k for k, _ in pitch.tts_keys(tts)]
+    log.info("음역 프로필: %s", pstore.profile.summary())
+
+    async def learn_pitch():
+        # TTS가 올라오면 현재 음색으로 문장 몇 개를 합성해 TTS 음역을 잰다(키별로 한 번, 음색이 바뀌면 다시)
+        try:
+            await asyncio.shield(loads)
+        except Exception:  # noqa: BLE001 로드 실패는 lifespan 쪽 로그로 충분
+            pass
+        if not config.PITCH_GATE:
+            return
+        try:
+            if await pitch.learn_tts(tts, pstore):
+                log.info("음역 프로필: %s", pstore.profile.summary())
+        except Exception:  # noqa: BLE001
+            log.exception("음역 학습(TTS) 실패")
+
+    pitch_task = asyncio.create_task(learn_pitch())
     if config.HERMES_MOCK:
         log.warning("HERMES_MOCK=1: 가짜 헤르메스 스트림 사용")
     yield
+    pitch_task.cancel()
+    pstore.flush()
     await tts.aclose()
     await hermes.aclose()
 
