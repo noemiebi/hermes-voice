@@ -70,16 +70,18 @@ function hvRms(input) {
 
 if (typeof registerProcessor === 'function') {
   class PcmCaptureProcessor extends AudioWorkletProcessor {
-    constructor() {
+    constructor(options) {
       super();
       this.ds = new HvDownsampler(sampleRate);
-      this.sending = false;
+      // prebuf: 노드가 만들어지자마자 프레임을 낸다(메인이 대화 전엔 링 버퍼에만 보관, 탭 직후 말 보존)
+      this.sending = !!(options && options.processorOptions && options.processorOptions.prebuf);
       this.levelAcc = 0;
       this.levelN = 0;
       this.port.onmessage = (e) => {
         const m = e.data || {};
         if (m.type === 'start') {
-          this.ds.reset();
+          // 이미 내보내는 중(사전 버퍼)이면 reset하지 않는다: 사전 버퍼와 실시간 프레임 경계가 끊기지 않게
+          if (!this.sending) this.ds.reset();
           this.sending = true;
         } else if (m.type === 'stop') {
           // 남은 샘플을 보내고 끝났다고 알린다(메인은 그 뒤 end_utterance 전송)

@@ -4,7 +4,7 @@
 //   끄려면 Safari 콘솔(또는 웹 검사기)에서 localStorage.setItem('hv.keepalive', '0') 후 새로 고침. 다시 켜려면 removeItem.
 'use strict';
 
-const APP_VERSION = '0.6.2';
+const APP_VERSION = '0.6.3';
 const AGENT_NAME_DEFAULT = 'Herbot'; // 서버 ready의 agent_name이 오면 그걸 쓴다
 const KEEPALIVE_LEVEL = 1e-5; // 약 -100 dBFS
 const DIAG_BUF_MAX = 20; // WS가 닫힌 동안 모아 둘 진단 줄 수
@@ -140,6 +140,10 @@ const st = {
   convSeq: 0, // 대화 회차(복구 도중 대화가 끝나거나 새로 시작됐는지 판별)
   lastPcmAt: 0, // 워클릿이 마지막으로 pcm 프레임을 낸 시각(전송 여부와 무관)
   capStartAt: 0, // 마지막 captureCmd('start') 시각(감시 기준점)
+  prebuf: [], // 대화 전 사전 버퍼(pcm ArrayBuffer, 최근 PREBUF_MS). 서버로는 구체 탭 시작 때만 보냄
+  prebufSamples: 0,
+  tapAt: 0, // 마지막 구체 탭(onPressStart) 시각
+  zeroFailed: false, // 이 대화에서 무음 복구가 3단계까지 실패함(다시 시도 안 함, 다음 대화 시작 때 초기화)
   micWatch: 0, // 시작 직후 1.5초 감시 타이머
   micFix: null, // 진행 중인 프레임 복구 Promise
   // 멈춘 컨텍스트(running인데 렌더링 정지) 재생성(전송 감시 3단계)
@@ -797,7 +801,7 @@ function connect() {
     st.pbState = 'idle';
     if (playing()) reportPlayback('speaking');
     // 끊기기 전 대화 중이었으면 이어서
-    if (st.conv) send({ type: 'conversation', on: true });
+    if (st.conv) { dropPrebuf(); send({ type: 'conversation', on: true }); }
     render();
   };
   ws.onmessage = (ev) => {
@@ -1453,6 +1457,7 @@ async function setupMic() {
       }
       const node = new AudioWorkletNode(ctx, 'pcm-capture', {
         numberOfInputs: 1, numberOfOutputs: 1, outputChannelCount: [1], channelCount: 1, channelCountMode: 'explicit',
+        processorOptions: { prebuf: true },
       });
       node.port.onmessage = (e) => onCaptureMsg(e.data);
       st.source.connect(node);
@@ -1466,6 +1471,7 @@ async function setupMic() {
   if (!worklet) {
     const sp = ctx.createScriptProcessor(4096, 1, 1);
     st.spDs = new HvDownsampler(ctx.sampleRate);
+    st.spSending = true; // 워클릿과 같이 사전 버퍼용으로 바로 낸다
     let acc = 0, cnt = 0;
     sp.onaudioprocess = (e) => {
       const ch = e.inputBuffer.getChannelData(0);
@@ -1528,7 +1534,7 @@ function captureCmd(type) {
   if (type === 'start') st.capStartAt = performance.now();
   if (c.port) { c.port.postMessage({ type }); return; }
   // ScriptProcessor 폴백
-  if (type === 'start') { st.spDs.reset(); st.spSending = true; }
+  if (type === 'start') { if (!st.spSending) st.spDs.reset(); st.spSending = true; }
   else if (type === 'stop') {
     if (st.spSending) st.spDs.flush((buf) => onCaptureMsg({ type: 'pcm', buf }));
     st.spSending = false;
@@ -1536,10 +1542,47 @@ function captureCmd(type) {
   } else if (type === 'abort') { st.spSending = false; st.spDs.reset(); }
 }
 
+// ---------- 사전 버퍼 ----------
+// 캡처 그래프가 올라온 뒤 대화가 켜지기 전까지의 프레임을 최근 PREBUF_MS만큼 보관했다가
+// 구체 탭으로 새로 시작할 때 conversation on 직후 먼저 보낸다(탭하고 바로 말한 첫 음절 보존).
+const PREBUF_MS = 2000;
+const PREBUF_MAX = 16 * PREBUF_MS; // 16 kHz 샘플 수
+function keepPrebuf(buf) {
+  st.prebuf.push(buf);
+  st.prebufSamples += buf.byteLength >> 1;
+  while (st.prebuf.length > 1 && st.prebufSamples - (st.prebuf[0].byteLength >> 1) >= PREBUF_MAX) {
+    st.prebufSamples -= st.prebuf.shift().byteLength >> 1;
+  }
+}
+function dropPrebuf() {
+  st.prebuf = [];
+  st.prebufSamples = 0;
+}
+// 앞쪽의 전부 0인 프레임(트랙이 막 올라온 구간)은 버리고 나머지를 순서대로 보낸다. 보낸 ms를 돌려준다.
+function sendPrebuf() {
+  const bufs = st.prebuf;
+  dropPrebuf();
+  let i = 0;
+  for (; i < bufs.length; i++) {
+    const a = new Int16Array(bufs[i]);
+    let nz = false;
+    for (let j = 0; j < a.length; j++) if (a[j] !== 0) { nz = true; break; }
+    if (nz) break;
+  }
+  let n = 0;
+  for (; i < bufs.length; i++) {
+    if (!st.ws || !st.wsOpen) break;
+    st.ws.send(bufs[i]);
+    n += bufs[i].byteLength >> 1;
+  }
+  return Math.round(n / 16);
+}
+
 function onCaptureMsg(m) {
   if (m.type === 'pcm') {
     st.lastPcmAt = performance.now();
     if (micSending()) st.ws.send(m.buf);
+    else if (!st.conv && !st.listening) keepPrebuf(m.buf); // 대화 전: 보관만(전송 안 함)
   } else if (m.type === 'flushed') {
     if (st.ending) {
       st.ending = false;
@@ -1585,7 +1628,7 @@ const ZERO_RETRY_MS = 20000;
 const ZERO_VERIFY_MS = 1500; // 새 트랙·새 컨텍스트에서 0이 아닌 샘플을 기다리는 시간
 const AWAY_SUSPECT_MS = 60000;
 function checkDeadTrack(zero, now = performance.now()) {
-  if (!st.conv || st.micMuted || !zero || st.micFix || st.convStarting || document.hidden) {
+  if (!st.conv || st.micMuted || !zero || st.micFix || st.convStarting || document.hidden || st.zeroFailed) {
     st.zeroSince = 0;
     return;
   }
@@ -1635,7 +1678,7 @@ async function waitNonZero(t, ms, alive) {
 async function runZeroFix(why) {
   const seq = st.convSeq;
   const alive = () => st.conv && st.convSeq === seq && !st.micMuted;
-  if (!alive()) return;
+  if (!alive() || st.zeroFailed) return;
   const t0 = micTrack();
   diag(`[mic] 무음 트랙(${why}, 0 샘플만): 트랙 다시 받음, muted=${t0 ? t0.muted : '-'} ${micDesc()}`, 'warn');
   toast('마이크를 다시 연결해요');
@@ -1659,10 +1702,14 @@ async function runZeroFix(why) {
   if (!alive()) return;
   diag(`[mic] 새 트랙도 ${ZERO_VERIFY_MS / 1000}초 동안 0 샘플: 컨텍스트를 새로 만듦, ${micDesc()}`, 'warn');
   const t3 = performance.now();
-  if (!await contextStage(`${why}, 새 트랙도 0 샘플`, alive)) return; // 실패·탭 대기는 contextStage가 안내
+  if (!await contextStage(`${why}, 새 트랙도 0 샘플`, alive)) { // 실패·탭 대기는 contextStage가 안내
+    if (alive() && !st.ctxPending) st.zeroFailed = true; // 3단계 실패: 이 대화에서는 더 시도 안 함
+    return;
+  }
   if (await waitNonZero(t3, ZERO_VERIFY_MS, alive)) { diag(`[mic] 무음 복구됨(새 컨텍스트), ${micDesc()}`); return; }
   if (!alive()) return;
-  diag(`[mic] 무음 복구 실패: 새 컨텍스트에서도 0 샘플, ${micDesc()}`, 'warn');
+  st.zeroFailed = true; // 이 대화에서는 다시 시도하지 않음(권한 프롬프트 반복 방지). 다음 대화 시작 때 초기화
+  diag(`[mic] 무음 복구 실패: 새 컨텍스트에서도 0 샘플, ${micDesc()} — 이 대화에서는 더 시도하지 않음`, 'warn');
   setMicNote(NOTE_DEAD);
   toast(NOTE_DEAD, 7000);
 }
@@ -1703,6 +1750,7 @@ function startListening() {
   st.ending = false;
   st.botEl = null;
   setTrackEnabled(true);
+  dropPrebuf(); // 누르고 말하기는 사전 버퍼를 쓰지 않음
   send({ type: 'start_utterance' });
   captureCmd('start');
   render();
@@ -1750,6 +1798,9 @@ async function startConversation(why = '') {
     return;
   }
   resetConvState();
+  st.zeroFailed = false; // 무음 복구 실패 표시는 새 대화마다 초기화
+  const tap = why === '구체 탭';
+  const tapAt = tap ? st.tapAt : 0;
   const seq = ++st.convSeq;
   st.convStarting = true;
   st.convPaused = false;
@@ -1758,6 +1809,7 @@ async function startConversation(why = '') {
   // 캡처 그래프는 대화마다 새로 만든다(트랙은 재사용). 옛 워클릿 노드가 끊기거나 멈춘 채
   // captureReady()만 true로 남아 프레임이 0개가 되는 경로를 없앤다.
   if (!st.micReady) disconnectCapture();
+  dropPrebuf(); // 탭 이전 프레임은 보내지 않는다(새 캡처 그래프부터 보관)
   render();
   try {
     await ensureMic();
@@ -1785,7 +1837,12 @@ async function startConversation(why = '') {
   st.botEl = null;
   setTrackEnabled(true);
   send({ type: 'conversation', on: true });
-  captureCmd('start');
+  if (tap) {
+    const readyMs = Math.round(performance.now() - tapAt);
+    const preMs = sendPrebuf(); // conversation on 직후, 실시간 프레임보다 먼저
+    diag(`[conv] 사전 버퍼 ${preMs} ms 전송(탭→준비 완료 ${readyMs} ms)`);
+  } else dropPrebuf();
+  captureCmd('start'); // 사전 버퍼로 이미 내보내는 중이면 다운샘플러를 reset하지 않고 이어감
   startKeepAlive();
   armMicWatch();
   startDiag();
@@ -2053,7 +2110,10 @@ async function onPressStart(e) {
     if (st.conv) {
       const s = displayState();
       if (s === 'speaking' || isBusy(s) || playing()) interrupt();
-    } else startConversation('구체 탭');
+    } else {
+      st.tapAt = performance.now();
+      startConversation('구체 탭');
+    }
     return;
   }
   if (st.pressing) return;
@@ -2211,7 +2271,7 @@ el.newSession.addEventListener('click', () => {
   if (st.listening) abortListening();
   interrupt();
   send({ type: 'new_session' });
-  if (st.conv) send({ type: 'conversation', on: true }); // 새 세션에서도 대화 유지
+  if (st.conv) { dropPrebuf(); send({ type: 'conversation', on: true }); } // 새 세션에서도 대화 유지
   st.sessionId = null;
   localStorage.removeItem(LS.session);
   localStorage.removeItem(LS.log); // 화면 기록은 여기서만 지운다

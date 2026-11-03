@@ -192,7 +192,8 @@ curl -s http://127.0.0.1:8480/health
 | `VAD_START_MS` | `160` | 기준을 연속으로 넘어야 하는 시간(말 시작) |
 | `VAD_END_THRESHOLD` | `0.35` | 이 아래면 침묵으로 셈 |
 | `VAD_END_SILENCE_MS` | `700` | 끝 침묵이 이만큼 이어지면 말 끝 |
-| `VAD_PREROLL_MS` | `300` | 말 시작 앞에 붙여 STT에 넣는 오디오 |
+| `VAD_PREROLL_MS` | `500` | 말 시작 앞에 붙여 STT에 넣는 오디오 |
+| `VAD_FIRST_PREROLL_MS` | `1000` | 대화 시작(`conversation on`) 뒤 첫 발화의 프리롤 |
 | `VAD_MIN_SPEECH_MS` | `300` | 이보다 짧은 발화는 버림 |
 | `VAD_MAX_UTTERANCE_MS` | `60000` | 한 발화 최대 길이(넘으면 강제로 끊어 턴 처리) |
 | `BARGE_THRESHOLD` / `BARGE_MS` | `0.7` / `400` | 생각·말하는 중(또는 클라이언트 `playback: speaking`)의 말 시작 기준 = 끼어들기 기준 |

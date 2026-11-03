@@ -79,7 +79,7 @@ def test_reset_restores_state(speech):
 
 
 def test_endpointer_start_end_with_preroll(speech):
-    p = VADParams()
+    p = VADParams(preroll_ms=300, first_preroll_ms=300)
     ep = Endpointer(p)
     sig = np.concatenate([silence(1.0), speech, silence(1.5)])
     evs = feed_chunks(ep, sig)
@@ -94,6 +94,38 @@ def test_endpointer_start_end_with_preroll(speech):
     # 말 끝 판정 위치: 음성 끝 뒤 end_silence_ms 근처(±300 ms)
     end_at = evs[1][0] / SAMPLE_RATE - 1.0 - len(speech) / SAMPLE_RATE
     assert p.end_silence_ms / 1000 - 0.1 < end_at < p.end_silence_ms / 1000 + 0.3, end_at
+
+
+def _utt_lens(ep, sig):
+    return [len(e.pcm) / 2 / SAMPLE_RATE for _, e in feed_chunks(ep, sig) if e.kind == "end"]
+
+
+def test_first_utterance_longer_preroll(speech):
+    # reset 뒤 첫 발화만 first_preroll_ms, 두 번째부터 preroll_ms
+    p = VADParams(preroll_ms=500, first_preroll_ms=1000)
+    ep = Endpointer(p)
+    sig = np.concatenate([silence(1.5), speech, silence(1.5), speech, silence(1.5)])
+    a, b = _utt_lens(ep, sig)
+    assert abs((a - b) - 0.5) < 0.1, (a, b)
+    # reset(conversation on)하면 다시 첫 발화 프리롤
+    ep.reset()
+    (c,) = _utt_lens(ep, np.concatenate([silence(1.5), speech, silence(1.5)]))
+    assert abs(c - a) < 0.05, (a, c)
+
+
+def test_first_preroll_with_burst_prebuffer(speech):
+    # 클라이언트 사전 버퍼를 한꺼번에(큰 청크로) 받아도 창 단위 판정은 같다
+    p = VADParams()
+    sig = np.concatenate([silence(0.3), speech, silence(1.5)])
+    small = [(e.kind, len(e.pcm)) for _, e in feed_chunks(Endpointer(p), sig, 100)]
+    ep = Endpointer(p)
+    head = int(2.0 * SAMPLE_RATE)
+    big = [(e.kind, len(e.pcm)) for e in ep.feed(pcm(sig[:head]))]
+    big += [(e.kind, len(e.pcm)) for _, e in feed_chunks(ep, sig[head:], 100)]
+    assert [k for k, _ in small] == ["start", "end"]
+    assert big == small, (big, small)
+    # 말 시작 전 0.3초가 모두 첫 프리롤(1초) 안에 남는다
+    assert small[1][1] / 2 / SAMPLE_RATE > len(speech) / SAMPLE_RATE + 0.25
 
 
 def test_endpointer_noise_only_no_events():

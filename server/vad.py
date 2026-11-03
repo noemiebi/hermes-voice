@@ -99,7 +99,8 @@ class VADParams:
     barge_ms: int = 400
     barge_min_db: float = -52.0   # 끼어들기 시작·hold 확정 카운터는 이 음량(dBFS) 이상인 창만 셈
     tail_threshold: float = 0.6   # 재생 직후 에코 꼬리 구간의 시작 확률(시간은 start_ms 그대로)
-    preroll_ms: int = 300
+    preroll_ms: int = 500
+    first_preroll_ms: int = 1000  # conversation on(reset) 뒤 첫 발화만: 막 말하던 중에 전송이 시작돼도 첫 음절이 남게
     min_speech_ms: int = 300      # 이보다 짧은 발화는 버림
     max_utterance_ms: int = 60000
     turn_detector: str = "silence"   # silence | smart-turn
@@ -117,7 +118,8 @@ class VADParams:
             barge_ms=int(e("BARGE_MS", "400")),
             barge_min_db=float(e("BARGE_MIN_DB", "-52")),
             tail_threshold=float(e("VAD_TAIL_THRESHOLD", "0.6")),
-            preroll_ms=int(e("VAD_PREROLL_MS", "300")),
+            preroll_ms=int(e("VAD_PREROLL_MS", "500")),
+            first_preroll_ms=int(e("VAD_FIRST_PREROLL_MS", "1000")),
             min_speech_ms=int(e("VAD_MIN_SPEECH_MS", "300")),
             max_utterance_ms=int(e("VAD_MAX_UTTERANCE_MS", "60000")),
             turn_detector=e("TURN_DETECTOR", "silence").strip().lower() or "silence",
@@ -167,11 +169,14 @@ class Endpointer:
         self.tail = tail or (lambda: False)
         self.echo_hint = echo_hint
         self.preroll_windows = max(0, params.preroll_ms // WINDOW_MS)
+        # reset() 뒤 첫 발화의 프리롤(일반 프리롤보다 짧아지지는 않음)
+        self.first_preroll_windows = max(self.preroll_windows, params.first_preroll_ms // WINDOW_MS)
         self.reset()
 
     def reset(self) -> None:
         self.vad.reset()
         self.in_speech = False
+        self._first = True            # reset 뒤 아직 말 시작을 잡지 않음(첫 발화 프리롤 적용)
         self._run = 0                 # 시작 후보 연속 창 수
         self._silence = 0             # 말 중 연속 무음 창 수
         self._speech_windows = 0
@@ -257,12 +262,13 @@ class Endpointer:
                 self._span += 1    # 작은 창: 세지 않되 연속은 유지
             else:
                 self._run = self._span = 0
-            keep = self.preroll_windows + max(self._span, 1)
+            keep = (self.first_preroll_windows if self._first else self.preroll_windows) + max(self._span, 1)
             if len(self._ring) > keep:
                 del self._ring[: len(self._ring) - keep]
                 del self._ring_flags[: len(self._ring_flags) - keep]
             if self._run * WINDOW_MS >= need_ms:
                 self.in_speech = True
+                self._first = False
                 self._utt = bytearray(b"".join(self._ring))
                 self._echo_windows = self._judged_windows = 0
                 for e, pp in self._ring_flags[-self._span:]:

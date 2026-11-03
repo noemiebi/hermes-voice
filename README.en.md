@@ -192,7 +192,8 @@ Path variables fall back to their defaults when left empty.
 | `VAD_START_MS` | `160` | How long the threshold must be exceeded continuously (speech start) |
 | `VAD_END_THRESHOLD` | `0.35` | Below this counts as silence |
 | `VAD_END_SILENCE_MS` | `700` | Trailing silence this long ends the utterance |
-| `VAD_PREROLL_MS` | `300` | Audio before the speech start that is prepended for STT |
+| `VAD_PREROLL_MS` | `500` | Audio before the speech start that is prepended for STT |
+| `VAD_FIRST_PREROLL_MS` | `1000` | Preroll for the first utterance after the conversation starts (`conversation on`) |
 | `VAD_MIN_SPEECH_MS` | `300` | Utterances shorter than this are discarded |
 | `VAD_MAX_UTTERANCE_MS` | `60000` | Maximum length of one utterance (cut off and processed as a turn when exceeded) |
 | `BARGE_THRESHOLD` / `BARGE_MS` | `0.7` / `400` | Speech-start threshold while thinking or speaking (or when the client reports `playback: speaking`) — i.e. the barge-in threshold |
