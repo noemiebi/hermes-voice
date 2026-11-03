@@ -109,7 +109,8 @@ if (typeof registerProcessor === 'function') {
       this.levelAcc += hvRms(ch);
       this.levelN++;
       if (this.levelN * ch.length >= sampleRate / 20) {
-        this.port.postMessage({ type: 'level', rms: this.levelAcc / this.levelN });
+        // zero: 이 구간 샘플이 전부 정확히 0(디지털 무음, iOS가 죽은 트랙을 준 경우). 아주 작은 값과 구분.
+        this.port.postMessage({ type: 'level', rms: this.levelAcc / this.levelN, zero: this.levelAcc === 0 });
         this.levelAcc = 0;
         this.levelN = 0;
       }

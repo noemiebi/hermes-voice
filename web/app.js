@@ -4,7 +4,7 @@
 //   끄려면 Safari 콘솔(또는 웹 검사기)에서 localStorage.setItem('hv.keepalive', '0') 후 새로 고침. 다시 켜려면 removeItem.
 'use strict';
 
-const APP_VERSION = '0.6.1';
+const APP_VERSION = '0.6.2';
 const AGENT_NAME_DEFAULT = 'Herbot'; // 서버 ready의 agent_name이 오면 그걸 쓴다
 const KEEPALIVE_LEVEL = 1e-5; // 약 -100 dBFS
 const DIAG_BUF_MAX = 20; // WS가 닫힌 동안 모아 둘 진단 줄 수
@@ -125,7 +125,13 @@ const st = {
   held: null, // hold 중: { gen, bufs: AudioBuffer[] } 아직 안 들려준 오디오(순서대로)
   duck: null, // 서버 hold(mode duck): { gen, gain } 재생은 계속, 출력 이득만 낮춤
   zeroSince: 0, // 대화 중 입력이 정확히 0(디지털 무음)으로 이어진 시작 시각
-  zeroTriedAt: 0, // 마지막 무음 트랙 재획득 시각(60초 뒤 다시 시도 가능)
+  zeroTriedAt: 0, // 마지막 무음 트랙 재획득 시각(ZERO_RETRY_MS 뒤 다시 시도 가능)
+  zeroRunAt: 0, // 진단: 0 샘플 레벨 보고가 이어진 시작 시각(대화 여부와 무관, zeros=Ns)
+  lastNonZeroAt: 0, // 마지막으로 0이 아닌 샘플이 들어온 레벨 보고 시각
+  lastPlayAt: 0, // 마지막으로 재생 중(playing())이던 것을 본 시각
+  convStartAt: 0, // 이번 대화가 켜진 시각(시작 직후 무음 트랙 판정용)
+  trackSuspect: false, // 백그라운드·interrupted가 60초 넘게 이어졌다 복귀함: 다음 무음 판정을 1초로
+  awaySince: 0, // visibility hidden 또는 ctx interrupted가 시작된 시각
   keepAlive: null, // 출력 유지 상수 소스(st.sources와 별개: playing·재생 위치·분석기에 안 섞임)
   diagBuf: [], // WS가 닫힌 동안의 진단 줄 { text, at }
   wsOpens: 0, // ws.onopen 횟수(진단)
@@ -1186,7 +1192,11 @@ function interrupt() {
 function newContext() {
   const AC = window.AudioContext || window.webkitAudioContext;
   const ctx = new AC();
-  ctx.onstatechange = () => diag(`[audio] ctx ${ctx.state}`);
+  ctx.onstatechange = () => {
+    diag(`[audio] ctx ${ctx.state}`);
+    if (ctx.state === 'interrupted') noteAway();
+    else if (ctx.state === 'running') noteBack(`ctx ${ctx.state}`);
+  };
   st.ctx = ctx;
   ensureOutput(ctx);
   return ctx;
@@ -1460,7 +1470,7 @@ async function setupMic() {
     sp.onaudioprocess = (e) => {
       const ch = e.inputBuffer.getChannelData(0);
       acc += hvRms(ch); cnt++;
-      if (cnt * ch.length >= ctx.sampleRate / 20) { onCaptureMsg({ type: 'level', rms: acc / cnt }); acc = 0; cnt = 0; }
+      if (cnt * ch.length >= ctx.sampleRate / 20) { onCaptureMsg({ type: 'level', rms: acc / cnt, zero: acc === 0 }); acc = 0; cnt = 0; }
       if (st.spSending) st.spDs.push(ch, (buf) => onCaptureMsg({ type: 'pcm', buf }));
     };
     st.source.connect(sp);
@@ -1539,11 +1549,20 @@ function onCaptureMsg(m) {
       render();
     }
   } else if (m.type === 'level') {
-    st.lastLevelAt = performance.now();
+    const now = performance.now();
+    st.lastLevelAt = now;
     st.diagSq += m.rms * m.rms;
     st.diagN++;
+    if (playing()) st.lastPlayAt = now;
+    const zero = m.empty ? false : (m.zero !== undefined ? m.zero : m.rms === 0);
+    if (m.empty || !zero) st.zeroRunAt = 0;
+    else if (!st.zeroRunAt) st.zeroRunAt = now;
+    if (!m.empty && !zero) {
+      st.lastNonZeroAt = now;
+      if (st.conv) st.trackSuspect = false; // 대화 중 실제 샘플이 들어옴: 트랙은 살아 있다
+    }
     if (m.empty) st.emptyN++; // 빈 입력은 무음 트랙 검사 대신 전송 감시(pcm 무프레임)가 처리
-    else checkDeadTrack(m.rms);
+    else checkDeadTrack(zero, now);
     if (st.micMuted) { setLevel(0); return; }
     if (st.listening || st.conv) {
       const v = Math.min(1, Math.sqrt(m.rms) * 2.2);
@@ -1552,24 +1571,114 @@ function onCaptureMsg(m) {
   }
 }
 
-// 대화 중 입력이 8초 넘게 정확히 0이면(iOS가 죽은 트랙을 준 경우) 트랙을 버리고 다시 받는다.
-// 재생 끝 직후 3~7초 0 입력은 저절로 돌아오므로(2026-11-03 서버 로그) 기다리고, 재시도는 60초 간격.
+// 입력이 디지털 무음(샘플이 정확히 0)으로 이어지면 iOS가 죽은 트랙을 준 것으로 보고 트랙을 다시 받는다
+// (2026-11-03 18:55 실기: 20분 백그라운드 뒤 ctx running·track live·워클릿 동작인데 샘플 전부 0, getUserMedia로 복구).
+// - 시작 직후: 대화 시작 뒤 0이 아닌 샘플도 재생도 없이 0만 ZERO_START_MS(백그라운드 복귀 의심이면 1000) → 바로
+// - 대화 중 한가함: 재생이 아니고 마지막 재생 뒤 ZERO_PLAY_GAP_MS 지난 시점부터 0이 ZERO_IDLE_MS
+// - 재생 중·직후: iOS가 재생 시작·끝 뒤 몇 초 0을 보내다 저절로 돌아오므로(2026-11-03 서버 로그) ZERO_TRACK_MS
+const ZERO_START_MS = 2000;
+const ZERO_START_SUSPECT_MS = 1000;
+const ZERO_IDLE_MS = 3000;
+const ZERO_PLAY_GAP_MS = 3000;
 const ZERO_TRACK_MS = 8000;
-const ZERO_RETRY_MS = 60000;
-function checkDeadTrack(rms) {
-  if (!st.conv || st.micMuted || rms !== 0 || st.micFix) {
+const ZERO_RETRY_MS = 20000;
+const ZERO_VERIFY_MS = 1500; // 새 트랙·새 컨텍스트에서 0이 아닌 샘플을 기다리는 시간
+const AWAY_SUSPECT_MS = 60000;
+function checkDeadTrack(zero, now = performance.now()) {
+  if (!st.conv || st.micMuted || !zero || st.micFix || st.convStarting || document.hidden) {
     st.zeroSince = 0;
     return;
   }
-  const now = performance.now();
   if (!st.zeroSince) st.zeroSince = now;
-  if (now - st.zeroSince > ZERO_TRACK_MS && (!st.zeroTriedAt || now - st.zeroTriedAt > ZERO_RETRY_MS)) {
-    const t = micTrack();
-    diag(`[mic] 무음 트랙 ${Math.round((now - st.zeroSince) / 1000)}초 → 트랙 재획득(muted=${t ? t.muted : '-'})`, 'warn');
-    st.zeroTriedAt = now;
+  if (st.zeroTriedAt && now - st.zeroTriedAt < ZERO_RETRY_MS) return;
+  const dur = now - st.zeroSince;
+  const startPhase = st.lastNonZeroAt < st.convStartAt && st.lastPlayAt < st.convStartAt && !playing();
+  const startMs = st.trackSuspect ? ZERO_START_SUSPECT_MS : ZERO_START_MS;
+  let why = '';
+  if (startPhase && dur >= startMs) {
+    why = `시작 뒤 ${startMs / 1000}초${st.trackSuspect ? ', 백그라운드 복귀' : ''}`;
+  } else if (!playing() && now - st.lastPlayAt >= ZERO_PLAY_GAP_MS
+    && now - Math.max(st.zeroSince, st.lastPlayAt + ZERO_PLAY_GAP_MS) >= ZERO_IDLE_MS) {
+    why = `대화 중 ${Math.round(dur / 1000)}초`;
+  } else if (dur > ZERO_TRACK_MS) {
+    why = `재생 중·직후 ${Math.round(dur / 1000)}초`;
+  }
+  if (!why) return;
+  st.zeroTriedAt = now;
+  st.zeroSince = 0;
+  fixZeroTrack(why);
+}
+
+function fixZeroTrack(why) {
+  if (st.micFix) return st.micFix;
+  st.trackSuspect = false;
+  st.micFix = runZeroFix(why).catch((e) => diag(`[mic] 무음 복구 오류 ${e && e.name} ${e && e.message}`, 'warn')).finally(() => {
+    st.micFix = null;
     st.zeroSince = 0;
-    releaseMic(); // recoverMic은 살아 있는 트랙이면 그냥 돌아가므로 먼저 버린다
-    recoverMic();
+    render();
+  });
+  return st.micFix;
+}
+
+// t 이후 0이 아닌 샘플이 들어오면 true
+async function waitNonZero(t, ms, alive) {
+  const end = performance.now() + ms;
+  while (performance.now() < end) {
+    if (!alive()) return false;
+    if (st.lastNonZeroAt >= t) return true;
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  return st.lastNonZeroAt >= t;
+}
+
+// 무음 트랙 복구: fixMic의 2단계(트랙 재획득)부터. 새 트랙도 0이면 3단계(새 컨텍스트), 그래도 0이면 안내.
+async function runZeroFix(why) {
+  const seq = st.convSeq;
+  const alive = () => st.conv && st.convSeq === seq && !st.micMuted;
+  if (!alive()) return;
+  const t0 = micTrack();
+  diag(`[mic] 무음 트랙(${why}, 0 샘플만): 트랙 다시 받음, muted=${t0 ? t0.muted : '-'} ${micDesc()}`, 'warn');
+  toast('마이크를 다시 연결해요');
+  releaseMic();
+  const t2 = performance.now();
+  try {
+    await ensureMic();
+  } catch (e) {
+    diag(`[mic] 트랙 재획득 실패 ${e && e.name} ${e && e.message}`, 'warn');
+    if (alive()) {
+      stopConversation('무음 트랙 재획득 실패');
+      st.convPaused = true;
+      toast(micErrorText(e), 7000);
+    }
+    return;
+  }
+  if (!alive()) return;
+  setTrackEnabled(true);
+  captureCmd('start');
+  if (await waitNonZero(t2, ZERO_VERIFY_MS, alive)) { diag(`[mic] 무음 복구됨(트랙 재획득), ${micDesc()}`); return; }
+  if (!alive()) return;
+  diag(`[mic] 새 트랙도 ${ZERO_VERIFY_MS / 1000}초 동안 0 샘플: 컨텍스트를 새로 만듦, ${micDesc()}`, 'warn');
+  const t3 = performance.now();
+  if (!await contextStage(`${why}, 새 트랙도 0 샘플`, alive)) return; // 실패·탭 대기는 contextStage가 안내
+  if (await waitNonZero(t3, ZERO_VERIFY_MS, alive)) { diag(`[mic] 무음 복구됨(새 컨텍스트), ${micDesc()}`); return; }
+  if (!alive()) return;
+  diag(`[mic] 무음 복구 실패: 새 컨텍스트에서도 0 샘플, ${micDesc()}`, 'warn');
+  setMicNote(NOTE_DEAD);
+  toast(NOTE_DEAD, 7000);
+}
+
+// 백그라운드(visibility hidden)나 ctx interrupted가 AWAY_SUSPECT_MS 넘게 이어졌다 돌아오면 트랙을 의심한다.
+// 홈 화면 앱에서 getUserMedia는 권한 프롬프트를 다시 띄우므로 미리 다시 받지 않고, 다음 대화의 무음 판정만 당긴다.
+function noteAway() {
+  if (!st.awaySince) st.awaySince = performance.now();
+}
+function noteBack(why) {
+  if (!st.awaySince || document.hidden) return;
+  const ms = performance.now() - st.awaySince;
+  st.awaySince = 0;
+  if (ms > AWAY_SUSPECT_MS) {
+    st.trackSuspect = true;
+    diag(`[mic] ${Math.round(ms / 1000)}초 만에 복귀(${why}): 트랙 의심, 다음 무음 판정 ${ZERO_START_SUSPECT_MS} ms`);
   }
 }
 
@@ -1671,6 +1780,7 @@ async function startConversation(why = '') {
   if (seq !== st.convSeq) return;
   if (!st.capture) { render(); return; }
   st.conv = true;
+  st.convStartAt = performance.now();
   st.vadSpeech = false;
   st.botEl = null;
   setTrackEnabled(true);
@@ -1883,7 +1993,7 @@ function startDiag() {
     diag(`[mic] ${db} dBFS ctx ${st.ctx ? st.ctx.state : '-'} ct=${dCt === null ? '-' : '+' + dCt.toFixed(3)} `
       + (t ? `track ${t.readyState} muted=${t.muted} enabled=${t.enabled}` : 'track -')
       + ` pcm ${since} 전 빈입력 ${st.emptyN} 송신 ${micSending() ? 'Y' : 'N'} 재생 ${st.sources.size} ka ${st.keepAlive ? 'on' : 'off'}`
-      + ` mute=${st.micMuted}`);
+      + ` mute=${st.micMuted} zeros=${st.zeroRunAt ? ((performance.now() - st.zeroRunAt) / 1000).toFixed(1) : '0'}s`);
     if (dCt !== null && dCt <= 0 && ctx.state === 'running' && st.conv && !st.micMuted && !st.micFix && !st.convStarting
       && !document.hidden && !playing() && !st.ctxPending && st.convRebuilds < CTX_REBUILD_MAX) {
       fixMic('진단: ct 정지 2초', true);
@@ -2202,10 +2312,12 @@ document.addEventListener('visibilitychange', () => {
     // 누르고 말하기 중이던 발화만 마무리. 대화·재생·마이크·연결은 그대로 둔다.
     if (st.listening) stopListening();
     st.pressing = false;
+    noteAway();
     stopAnim();
     render();
   } else {
     st.capStartAt = performance.now(); // 숨겨진 동안의 무프레임은 감시에서 빼기
+    noteBack('visible');
     onForeground('visible');
   }
 });
