@@ -3,6 +3,7 @@
 프로토콜(JSON lines):
   시작: 모델 로드·예열 뒤 stdout {"ready":true,"model":...,"voice":...,"load_ms":n}
   stdin  {"id":n,"text":"...","voice":"Sohee","seed":n?}   합성 요청(큐, 한 번에 하나, seed는 선택)
+         선택 필드 "instruct","temperature","top_k","top_p","repetition_penalty"는 그 요청만 덮어씀
   stdin  {"cancel":n}                             생성 중단(다음 청크 경계에서) -> {"id":n,"cancelled":true}
   stdout {"id":n,"sr":24000,"pcm":"<base64 int16 LE mono>"}  청크(여러 개)
   stdout {"id":n,"done":true,"ms":합성ms,"first_ms":첫청크ms,"samples":n}
@@ -11,6 +12,7 @@
 
 인자/env: --model(QWEN_TTS_MODEL) --voice(QWEN_TTS_VOICE) --interval(QWEN_TTS_STREAM_INTERVAL, 초)
           --instruct(QWEN_TTS_INSTRUCT, 1.7B만) --lang(QWEN_TTS_LANG). HF 위치는 env QWEN_TTS_HF_HOME(없으면 HF_HOME).
+          샘플링 --temperature --top-k --top-p --repetition-penalty(생략=모델 기본, mlx-audio 0.9/50/1.0/1.05).
 """
 from __future__ import annotations
 
@@ -86,14 +88,41 @@ class Requests:
             self.cancelled.discard(rid)
 
 
-def main() -> int:
+SAMPLING_KEYS = (("temperature", float), ("top_k", int), ("top_p", float), ("repetition_penalty", float))
+
+
+def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser()
     ap.add_argument("--model", default=os.environ.get("QWEN_TTS_MODEL", DEFAULT_MODEL))
     ap.add_argument("--voice", default=os.environ.get("QWEN_TTS_VOICE", "Sohee"))
     ap.add_argument("--interval", type=float, default=float(os.environ.get("QWEN_TTS_STREAM_INTERVAL", "0.32")))
     ap.add_argument("--instruct", default=os.environ.get("QWEN_TTS_INSTRUCT", ""))
     ap.add_argument("--lang", default=os.environ.get("QWEN_TTS_LANG", "korean"))
-    args = ap.parse_args()
+    ap.add_argument("--temperature", type=float, default=None)
+    ap.add_argument("--top-k", dest="top_k", type=int, default=None)
+    ap.add_argument("--top-p", dest="top_p", type=float, default=None)
+    ap.add_argument("--repetition-penalty", dest="repetition_penalty", type=float, default=None)
+    return ap
+
+
+def sampling_kwargs(args: argparse.Namespace) -> dict:
+    """CLI에서 지정한 샘플링 값만 generate kwargs로(None이면 모델 기본)."""
+    return {k: getattr(args, k) for k, _ in SAMPLING_KEYS if getattr(args, k, None) is not None}
+
+
+def request_kwargs(base: dict, msg: dict) -> dict:
+    """요청별 덮어쓰기: instruct·샘플링 선택 필드(값이 null이 아니면)."""
+    kw = dict(base)
+    if msg.get("instruct"):
+        kw["instruct"] = msg["instruct"]
+    for k, typ in SAMPLING_KEYS:
+        if msg.get(k) is not None:
+            kw[k] = typ(msg[k])
+    return kw
+
+
+def main() -> int:
+    args = build_parser().parse_args()
 
     # mlx/transformers가 stdout에 무언가 찍어도 프로토콜이 깨지지 않게 stdout을 stderr로 돌려 둔다.
     sys.stdout = sys.stderr
@@ -108,6 +137,7 @@ def main() -> int:
         kw = dict(voice=args.voice, lang_code=args.lang)
         if args.instruct:
             kw["instruct"] = args.instruct
+        kw.update(sampling_kwargs(args))
         for _ in model.generate("안녕하세요.", **kw):  # 예열(전체 합성 1회 + 스트리밍 1회)
             pass
         for _ in model.generate("네, 알겠어요.", stream=True, streaming_interval=args.interval, **kw):
@@ -118,6 +148,7 @@ def main() -> int:
         return 1
     load_ms = int((time.perf_counter() - t) * 1000)
     log(f"ready: {args.model} voice={args.voice} interval={args.interval} instruct={args.instruct!r} "
+        f"sampling={sampling_kwargs(args)} "
         f"load {load_ms} ms, peak mem {mx.get_peak_memory() / 1e9:.2f} GB")
     emit({"ready": True, "model": args.model, "voice": args.voice, "load_ms": load_ms,
           "peak_mem_gb": round(mx.get_peak_memory() / 1e9, 2)})
@@ -136,10 +167,8 @@ def main() -> int:
         if not text:
             emit({"id": rid, "done": True, "ms": 0, "first_ms": None, "samples": 0})
             continue
-        rkw = dict(kw)
+        rkw = request_kwargs(kw, msg)
         rkw["voice"] = msg.get("voice") or args.voice
-        if msg.get("instruct"):
-            rkw["instruct"] = msg["instruct"]
         if msg.get("seed") is not None:  # 재현용(스모크 비교): 같은 seed면 같은 음성
             mx.random.seed(int(msg["seed"]))
         t0 = time.perf_counter()

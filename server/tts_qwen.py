@@ -222,6 +222,19 @@ class QwenPostProcessor:
 
 
 # ---------------------------------------------------------------- 워커 엔진
+def sampling_args(temperature: str = None, top_k: str = None, top_p: str = None) -> list[str]:
+    """config의 QWEN_TTS_TEMPERATURE·TOP_K·TOP_P(빈 값=모델 기본) -> 워커 CLI 인자."""
+    vals = (("--temperature", config.QWEN_TTS_TEMPERATURE if temperature is None else temperature),
+            ("--top-k", config.QWEN_TTS_TOP_K if top_k is None else top_k),
+            ("--top-p", config.QWEN_TTS_TOP_P if top_p is None else top_p))
+    out: list[str] = []
+    for flag, v in vals:
+        v = str(v).strip()
+        if v:
+            out += [flag, v]
+    return out
+
+
 class QwenTTSEngine:
     MAX_RESTARTS = 3
     RESTART_WINDOW_S = 600.0
@@ -235,7 +248,7 @@ class QwenTTSEngine:
         self.cmd = cmd or [config.QWEN_TTS_PYTHON, "-I", str(WORKER),
                            "--model", config.QWEN_TTS_MODEL, "--voice", voice,
                            "--interval", str(config.QWEN_TTS_STREAM_INTERVAL)] + (
-            ["--instruct", config.QWEN_TTS_INSTRUCT] if config.QWEN_TTS_INSTRUCT else [])
+            ["--instruct", config.QWEN_TTS_INSTRUCT] if config.QWEN_TTS_INSTRUCT else []) + sampling_args()
         self.env = env
         self.ready_timeout_s = ready_timeout_s
         self.proc: Optional[asyncio.subprocess.Process] = None
@@ -521,7 +534,8 @@ class TTSRouter:
         log.warning("Qwen TTS 폴백 -> Supertonic (%s): %s", reason, text[:40])
 
     async def synth_stream(self, text: str, is_current: Callable[[], bool] = lambda: True,
-                           lead_s: float = 0.0, turn_id=None) -> AsyncIterator[np.ndarray]:
+                           lead_s: float = 0.0, turn_id=None,
+                           seed: Optional[int] = None) -> AsyncIterator[np.ndarray]:
         t0 = time.perf_counter()
         if self.engine == "qwen" and turn_id is not None and turn_id == self._fallback_turn:
             log.info("같은 답이라 Supertonic 유지: %s", text[:40])
@@ -534,7 +548,7 @@ class TTSRouter:
             else:
                 if not can_fallback:
                     log.info("Supertonic 없음: Qwen 대기: %s", text[:40])
-                agen = self.qwen.synth_stream(text, is_current)
+                agen = self.qwen.synth_stream(text, is_current, seed=seed)
                 try:
                     first = await asyncio.wait_for(agen.__anext__(), limit)
                 except StopAsyncIteration:

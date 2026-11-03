@@ -459,3 +459,67 @@ def test_speaker_keeps_supertonic_for_rest_of_answer(tmp_path):
     st, router, reqs = run(main())
     assert st.calls == ["느림 첫 문장", "둘째 문장"] and router.fallbacks == 1 and router.fallback_turns == 1
     assert not any("둘째" in q for q in reqs)
+
+
+# ---------------------------------------------------------------- 샘플링 인자·답 단위 seed
+def test_worker_sampling_args_and_request_override():
+    import importlib
+    saved = dict(os.environ)
+    try:
+        w = importlib.import_module("server.qwen_tts_worker")   # import 시 HF_* env를 바꾸므로 되돌린다
+    finally:
+        os.environ.clear()
+        os.environ.update(saved)
+    a = w.build_parser().parse_args([])
+    assert w.sampling_kwargs(a) == {}                            # 기본: 모델 기본값 그대로
+    a = w.build_parser().parse_args(["--temperature", "0.6", "--top-k", "20", "--top-p", "0.9",
+                                     "--repetition-penalty", "1.1"])
+    base = w.sampling_kwargs(a)
+    assert base == {"temperature": 0.6, "top_k": 20, "top_p": 0.9, "repetition_penalty": 1.1}
+    kw = w.request_kwargs(base, {"id": 1, "text": "x", "temperature": 0.3, "top_k": "5", "top_p": None})
+    assert kw["temperature"] == 0.3 and kw["top_k"] == 5 and kw["top_p"] == 0.9
+
+
+def test_engine_sampling_cmd(monkeypatch):
+    from server import config as cfg
+    from server.tts_qwen import sampling_args
+    monkeypatch.setattr(cfg, "QWEN_TTS_TEMPERATURE", "")
+    monkeypatch.setattr(cfg, "QWEN_TTS_TOP_K", "")
+    monkeypatch.setattr(cfg, "QWEN_TTS_TOP_P", "")
+    assert sampling_args() == []
+    assert "--temperature" not in QwenTTSEngine().cmd
+    monkeypatch.setattr(cfg, "QWEN_TTS_TEMPERATURE", "0.6")
+    monkeypatch.setattr(cfg, "QWEN_TTS_TOP_K", "20")
+    assert sampling_args() == ["--temperature", "0.6", "--top-k", "20"]
+    cmd = QwenTTSEngine().cmd
+    assert cmd[cmd.index("--temperature") + 1] == "0.6" and cmd[cmd.index("--top-k") + 1] == "20"
+
+
+def seeds(log: Path) -> dict:
+    out = {}
+    for ln in log.read_text().splitlines() if log.exists() else []:
+        if ln.startswith("seed "):
+            _, rid, sd = ln.split()
+            out[int(rid)] = int(sd)
+    return out
+
+
+def test_session_turn_seed(tmp_path):
+    async def main():
+        s, ws, router, st, log = await make_session(tmp_path)
+        assert s.turn_seed is False                              # 기본 끔: seed 안 보냄
+        s.generation = 1
+        await s._speak_stream(1, "끔 하나", "끔 하나")
+        s.turn_seed = True
+        s.generation = 2
+        await s._speak_stream(2, "첫 문장", "첫 문장")
+        await s._speak_stream(2, "둘째 문장", "둘째 문장")
+        s.generation = 3
+        await s._speak_stream(3, "다음 답", "다음 답")
+        s.speaker_task.cancel()
+        await router.aclose()
+        return seeds(log), requests(log)
+    sd, reqs = run(main())
+    assert reqs == ["끔 하나", "첫 문장", "둘째 문장", "다음 답"]
+    assert 1 not in sd                                           # 꺼져 있을 때 첫 요청(id 1)은 seed 없음
+    assert sd[2] == sd[3] and 4 in sd                            # 같은 답의 두 문장은 같은 seed, 다음 답도 seed 있음

@@ -83,6 +83,12 @@ QWEN_TTS_TEMPO = float(os.environ.get("QWEN_TTS_TEMPO", "1.2"))
 QWEN_TTS_TSM_FRAME_MS = float(os.environ.get("QWEN_TTS_TSM_FRAME_MS", "40"))
 QWEN_TTS_TSM_TOL_MS = float(os.environ.get("QWEN_TTS_TSM_TOL_MS", "15"))
 QWEN_TTS_INSTRUCT = os.environ.get("QWEN_TTS_INSTRUCT", "").strip()
+# 샘플링(빈 값 = mlx-audio 모델 기본 temperature 0.9·top_k 50·top_p 1.0). 낮추면 문장마다 톤 편차가 줄어든다.
+QWEN_TTS_TEMPERATURE = os.environ.get("QWEN_TTS_TEMPERATURE", "").strip()
+QWEN_TTS_TOP_K = os.environ.get("QWEN_TTS_TOP_K", "").strip()
+QWEN_TTS_TOP_P = os.environ.get("QWEN_TTS_TOP_P", "").strip()
+# 1이면 한 답(turn)의 모든 문장에 같은 seed를 넘겨 문장 사이 톤을 맞춘다(기본 0=끔, 문장마다 무작위)
+QWEN_TTS_TURN_SEED = os.environ.get("QWEN_TTS_TURN_SEED", "0").strip().lower() in ("1", "true", "yes", "on")
 # 독음 정규화(server/tts_text.py): 사전에 없는 영어 단어를 그대로(keep) 둘지 글자별로(spell) 읽을지, 사용자 사전 경로
 TTS_ENGLISH_MODE = os.environ.setdefault("TTS_ENGLISH_MODE", "keep").strip().lower()
 TTS_LEXICON_USER = os.environ.setdefault("TTS_LEXICON_USER", str(VOICE_DATA_DIR / "tts-lexicon.tsv"))

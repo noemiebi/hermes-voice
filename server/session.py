@@ -99,6 +99,8 @@ class VoiceSession:
         self._hold_base_ms = 0
         self._hold_at = 0.0
         self._speaking_now = False        # 스피커 태스크가 문장을 합성·전송하는 중
+        self.turn_seed = config.QWEN_TTS_TURN_SEED  # 켜면 한 답의 모든 문장에 같은 TTS seed(문장 사이 톤 맞춤)
+        self._seed_for: tuple[int, int] = (-1, 0)   # (generation, 그 답의 seed)
         self._play_until = 0.0            # 보낸 오디오 길이로 추정한 클라이언트 재생 끝(clock). pos_ms 없는 옛 클라이언트용
         self._last_report = -1e9          # 마지막 playback speaking(pos_ms) 보고 시각
         self._sched: list[tuple[float, float]] = []  # 이 generation 문장별 (서버 기준 예상 시작, 길이 s): 재생 지연 진단
@@ -1229,6 +1231,14 @@ class VoiceSession:
         Qwen 첫 청크를 더 기다려도 소리가 끊기지 않는다고 본다."""
         return max(0.0, self._est_play_end(gen) - self.clock())
 
+    def _turn_seed(self, gen: int) -> Optional[int]:
+        """QWEN_TTS_TURN_SEED가 켜져 있으면 이 답(generation)에서 쓸 seed(답마다 무작위로 한 번 정함), 아니면 None."""
+        if not self.turn_seed:
+            return None
+        if self._seed_for[0] != gen:
+            self._seed_for = (gen, random.randrange(1, 2**31))
+        return self._seed_for[1]
+
     async def _speak_stream(self, gen: int, item: str, spoken: str, lead_s: float = 0.0) -> bool:
         """문장 하나를 스트리밍 엔진으로 합성하며 청크가 오는 대로 보낸다. 오디오를 보냈으면 True.
 
@@ -1241,8 +1251,12 @@ class VoiceSession:
         first_ms: Optional[int] = None
         total = 0
         st0 = 0.0
+        kw = {}
+        seed = self._turn_seed(gen)
+        if seed is not None:
+            kw["seed"] = seed
         stream = self.tts.synth_stream(spoken, is_current=lambda g=gen: g == self.generation,
-                                       lead_s=lead_s, turn_id=gen)
+                                       lead_s=lead_s, turn_id=gen, **kw)
         try:
             async for pcm in stream:
                 if gen != self.generation:

@@ -2,7 +2,8 @@
 
 텍스트에 든 표지로 동작을 바꾼다(세션 경로는 독음 정규화를 거치므로 한글 표지도 받음):
 SLOW·느림(첫 청크 전 2초), ERR·오류(오류), LONG·길게(청크 40개, 50 ms 간격), DIE·종료(즉시 종료).
-그 밖에는 440 Hz 사인 0.2초 청크 3개. 받은 cancel은 env FAKE_QWEN_LOG 파일에 한 줄씩 적는다."""
+그 밖에는 440 Hz 사인 0.2초 청크 3개. 받은 cancel은 env FAKE_QWEN_LOG 파일에 한 줄씩 적는다.
+실제 워커의 CLI 인자(--temperature 등)는 무시하고 'argv ...' 줄로, 요청의 seed는 'seed id n' 줄로 적는다."""
 import base64
 import json
 import os
@@ -44,6 +45,7 @@ def emit(o):
     sys.stdout.flush()
 
 
+note("argv " + " ".join(sys.argv[1:]))
 threading.Thread(target=reader, daemon=True).start()
 emit({"ready": True, "model": "fake"})
 pos = 0
@@ -53,6 +55,8 @@ while True:
         break
     rid, text = m["id"], m["text"]
     note(f"req {rid} {text}")
+    if m.get("seed") is not None:
+        note(f"seed {rid} {m['seed']}")
     if ("DIE" in text or "종료" in text):
         sys.exit(3)
     if ("ERR" in text or "오류" in text):
