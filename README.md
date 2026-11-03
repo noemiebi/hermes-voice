@@ -1,5 +1,7 @@
 # Hermes Voice
 
+[English](README.en.md) · 한국어
+
 아이폰 홈 화면 웹앱(PWA)으로 내 맥에서 도는 [Hermes Agent](https://github.com/NousResearch/hermes-agent)와 말로 대화하는 로컬 음성 서버입니다. 음성 인식(STT)과 음성 합성(TTS)은 모두 맥 안에서 돌고(mlx-whisper large-v3-turbo, Supertonic 3 ONNX), 외부 음성 API를 쓰지 않습니다. 답은 Hermes Agent의 API 서버(`/v1/chat/completions` SSE 스트림)가 만들며, 문장 단위로 바로 합성해 들려줍니다. 핸즈프리로 말을 주고받고, 답하는 중에 말을 걸어 끊을 수 있습니다. 대화 상대 이름은 `AGENT_NAME`(기본 `Herbot`)으로 바꿀 수 있습니다.
 
 설계는 [`docs/설계안.md`](docs/설계안.md), 서버·클라이언트 메시지 계약은 [`docs/프로토콜.md`](docs/프로토콜.md)에 있습니다.
