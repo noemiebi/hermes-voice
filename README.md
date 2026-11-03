@@ -2,7 +2,7 @@
 
 [English](README.en.md) · 한국어
 
-아이폰 홈 화면 웹앱(PWA)으로 내 맥에서 도는 [Hermes Agent](https://github.com/NousResearch/hermes-agent)와 말로 대화하는 로컬 음성 서버입니다. 음성 인식(STT)과 음성 합성(TTS)은 모두 맥 안에서 돌고(mlx-whisper large-v3-turbo, Qwen3-TTS(기본) / Supertonic 3(폴백)), 외부 음성 API를 쓰지 않습니다. 답은 Hermes Agent의 API 서버(`/v1/chat/completions` SSE 스트림)가 만들며, 문장 단위로 바로 합성해 들려줍니다. 핸즈프리로 말을 주고받고, 답하는 중에 말을 걸어 끊을 수 있습니다. 대화 상대 이름은 `AGENT_NAME`(기본 `Herbot`)으로 바꿀 수 있습니다.
+아이폰 홈 화면 웹앱(PWA)으로 내 맥에서 도는 [Hermes Agent](https://github.com/NousResearch/hermes-agent)와 말로 대화하는 로컬 음성 서버입니다. 음성 인식(STT)과 음성 합성(TTS)은 모두 맥 안에서 돌고(mlx-whisper large-v3-turbo, Supertonic 3 ONNX(기본) / Qwen3-TTS(선택)), 외부 음성 API를 쓰지 않습니다. 답은 Hermes Agent의 API 서버(`/v1/chat/completions` SSE 스트림)가 만들며, 문장 단위로 바로 합성해 들려줍니다. 핸즈프리로 말을 주고받고, 답하는 중에 말을 걸어 끊을 수 있습니다. 대화 상대 이름은 `AGENT_NAME`(기본 `Herbot`)으로 바꿀 수 있습니다.
 
 설계는 [`docs/설계안.md`](docs/설계안.md), 서버·클라이언트 메시지 계약은 [`docs/프로토콜.md`](docs/프로토콜.md)에 있습니다.
 
@@ -10,7 +10,7 @@
 
 - Apple Silicon 맥 (mlx-whisper가 MLX를 씀)
 - Python 3.12, [uv](https://docs.astral.sh/uv/)
-- 기본 TTS인 Qwen3-TTS용 여유: 디스크 약 2 GB(1.7B 8bit 모델), 실행 중 메모리 약 4 GB(별도 워커 프로세스). 부족하면 아래 '가벼운 대안: Supertonic만 쓰기'
+- (선택) Qwen3-TTS를 쓰면: 디스크 약 2 GB(1.7B 8bit 모델), 실행 중 메모리 약 4 GB(별도 워커 프로세스). 아래 '선택: Qwen3-TTS'
 - [Hermes Agent](https://github.com/NousResearch/hermes-agent) 설치, API 서버(`platforms.api_server`) 켜짐
 - 아이폰 Safari (홈 화면에 추가해서 씀)
 - HTTPS 접속 경로. 브라우저 마이크는 HTTPS에서만 열립니다. [Tailscale](https://tailscale.com/) `serve`를 권장합니다(아래 '배포').
@@ -37,16 +37,7 @@ uv pip install --python .venv/bin/python --no-deps silero-vad   # VAD ONNX만 �
 .venv/bin/hf download mlx-community/whisper-large-v3-turbo
 ```
 
-**Qwen3-TTS (TTS, 기본)**: 1.7B CustomVoice 8bit, 스트리밍. mlx-audio가 메인 `.venv`와 의존성이 부딪쳐 별도 venv `.venv-tts`의 워커 프로세스(`server/qwen_tts_worker.py`)로 돕니다. 모델은 HF 캐시(`QWEN_TTS_HF_HOME`, 기본 `$HF_HOME` 또는 `~/.cache/huggingface`)에 받습니다. 음색은 `QWEN_TTS_VOICE`(기본 `Sohee`)로 고릅니다. 모델 라이선스는 Apache-2.0입니다.
-
-```sh
-deploy/install-tts.sh                  # .venv-tts (Python 3.12 + mlx-audio), --force면 새로 만듦
-.venv-tts/bin/hf download mlx-community/Qwen3-TTS-12Hz-1.7B-CustomVoice-8bit
-#   캐시를 다른 곳에 두려면 HF_HOME=<경로> 를 앞에 붙이고 .env에 QWEN_TTS_HF_HOME=<경로>
-.venv/bin/python tests/smoke_tts_qwen.py   # (선택) 첫 청크 지연·RTF·메모리, wav는 tests/out/qwen-smoke/
-```
-
-**Supertonic 3 (TTS 폴백, 권장)**: Qwen이 늦거나 실패한 문장을 대신 읽습니다. 없어도 돌아가지만 바쁠 때 침묵이 길어질 수 있습니다(폴백할 곳이 없으면 Qwen을 끝까지 기다림). [Supertone/supertonic-3](https://huggingface.co/Supertone/supertonic-3)을 `SUPERTONIC_DIR`(기본 `~/.hermes/voice/models/supertonic3`)에 받습니다.
+**Supertonic 3 (TTS, 기본)**: 기본 음성 엔진입니다(음색 F1, 말 속도 `TTS_SPEED` 1.2배). Qwen3-TTS를 쓸 때도 늦거나 실패한 문장의 폴백으로 씁니다. [Supertone/supertonic-3](https://huggingface.co/Supertone/supertonic-3)을 `SUPERTONIC_DIR`(기본 `~/.hermes/voice/models/supertonic3`)에 받습니다.
 
 ```sh
 .venv/bin/hf download Supertone/supertonic-3 \
@@ -170,13 +161,13 @@ curl -s http://127.0.0.1:8480/health
 
 | 이름 | 기본값 | 설명 |
 |---|---|---|
-| `TTS_ENGINE` | `qwen` | `qwen`: Qwen3-TTS 스트리밍 + 문장 단위 Supertonic 폴백(`.venv-tts` 필요, '2. 모델 받기'). 한 답에서 한 번 폴백하면 그 답의 남은 문장도 Supertonic(답 중간에 목소리가 바뀌지 않게). Supertonic 모델이 없으면 폴백 없이 Qwen을 기다림. `supertonic`: Supertonic만(아래 '가벼운 대안: Supertonic만 쓰기') |
-| `QWEN_TTS_LEAD_MARGIN_S` | `0.5` | 앞 문장이 재생 중이면 Qwen 첫 청크를 (남은 재생 시간 - 이 값)까지 더 기다림(최소 `QWEN_TTS_FIRST_CHUNK_TIMEOUT_S` 2.5초) |
+| `TTS_ENGINE` | `supertonic` | `supertonic`: Supertonic 3 ONNX만. `qwen`(선택): Qwen3-TTS 스트리밍 + 문장 단위 Supertonic 폴백(`.venv-tts` 필요, 아래 '선택: Qwen3-TTS'). 한 답에서 한 번 폴백하면 그 답의 남은 문장도 Supertonic(답 중간에 목소리가 바뀌지 않게). Supertonic 모델이 없으면 폴백 없이 Qwen을 기다림 |
+| `QWEN_TTS_LEAD_MARGIN_S` | `0.5` | (`TTS_ENGINE=qwen`일 때만, 이 표의 `QWEN_TTS_*` 모두 같음) 앞 문장이 재생 중이면 Qwen 첫 청크를 (남은 재생 시간 - 이 값)까지 더 기다림(최소 `QWEN_TTS_FIRST_CHUNK_TIMEOUT_S` 2.5초) |
 | `QWEN_TTS_FIRST_CHUNK_MAX_S` | `12` | 위 연장 대기의 상한(초) |
 | `SUPERTONIC_DIR` | `~/.hermes/voice/models/supertonic3` | `onnx/`, `voice_styles/`를 담은 폴더 |
 | `SUPERTONIC_MODEL_DIR` | `$SUPERTONIC_DIR/onnx` | |
 | `SUPERTONIC_VOICE` | `$SUPERTONIC_DIR/voice_styles/F1.json` | 음색 |
-| `TTS_SPEED` | `1.3` | Supertonic 말 속도 |
+| `TTS_SPEED` | `1.2` | Supertonic 말 속도 |
 | `TTS_TAIL_MS` / `TTS_FADE_MS` | `300` / `20` | 두 엔진 공통. 문장 끝에 남기는 쉼(ms)과 소리 시작·끝 페이드(ms). 쉼은 속도 신축 뒤에 정확한 길이로 붙음 |
 | `TTS_STEPS` | `5` | Supertonic 디노이징 단계 |
 | `TTS_PROVIDER` | `cpu` | `coreml`도 되지만 측정상 CPU가 더 빠름 |
@@ -230,9 +221,22 @@ curl -s http://127.0.0.1:8480/health
 - 홈 화면 앱은 열 때마다 마이크 권한을 묻습니다(WebKit 버그 327237). 그래서 실행 중에는 마이크 트랙을 멈추지 않고 `enabled=false`로만 끕니다. iOS 설정 › 앱 › Safari › 마이크 › 허용이 완화책으로 보고됐으나 확인하지 못했습니다.
 - 마이크를 쓰는 동안은 통화 음량이 적용돼 소리가 작습니다(WebKit 버그 236219). 대화 중에 음량 버튼으로 조절하고, 설정의 '소리 크기'로 더 키울 수 있습니다.
 
-## 가벼운 대안: Supertonic만 쓰기
+## 선택: Qwen3-TTS
 
-메모리가 빠듯하거나 Qwen3-TTS를 설치하고 싶지 않으면 `.env`에 `TTS_ENGINE=supertonic`을 넣고 서버를 다시 시작합니다. Supertonic 3 ONNX만 쓰므로 메모리가 적고 로드가 빠르며, `.venv-tts`와 Qwen 모델은 필요 없습니다(Supertonic 모델은 '2. 모델 받기'대로 받아야 합니다). 목소리는 Qwen3-TTS보다 덜 자연스럽습니다.
+Qwen3-TTS는 문장마다 톤이 조금씩 달라지는 경향이 있어 기본은 Supertonic이지만, 더 자연스러운 음색을 원하면 Qwen3-TTS(1.7B CustomVoice 8bit, 스트리밍)를 쓸 수 있습니다. 디스크 약 2 GB, 실행 중 메모리 약 4 GB가 더 듭니다.
+mlx-audio가 메인 `.venv`와 의존성이 부딪쳐 별도 venv `.venv-tts`의 워커 프로세스(`server/qwen_tts_worker.py`)로 돕니다. 모델 라이선스는 Apache-2.0입니다.
+
+```sh
+deploy/install-tts.sh                  # .venv-tts (Python 3.12 + mlx-audio), --force면 새로 만듦
+.venv-tts/bin/hf download mlx-community/Qwen3-TTS-12Hz-1.7B-CustomVoice-8bit
+#   캐시를 다른 곳에 두려면 HF_HOME=<경로> 를 앞에 붙이고 .env에 QWEN_TTS_HF_HOME=<경로>
+.venv/bin/python tests/smoke_tts_qwen.py   # (선택) 첫 청크 지연·RTF·메모리, wav는 tests/out/qwen-smoke/
+```
+
+바꾸려면 `.env`에 `TTS_ENGINE=qwen`을 넣고 서버를 다시 시작합니다.
+음색은 `QWEN_TTS_VOICE`(기본 `Sohee`), 모델 캐시는 `QWEN_TTS_HF_HOME`(기본 `$HF_HOME` 또는 `~/.cache/huggingface`)으로 정합니다. 나머지 `QWEN_TTS_*` 변수(말 속도 `QWEN_TTS_TEMPO`, 샘플링 등)는 `server/config.py`와 `docs/프로토콜.md` 'TTS 엔진'에 있습니다.
+
+Qwen이 실패하거나 첫 청크가 늦으면 그 문장은 Supertonic으로 폴백하고, 한 답에서 한 번 폴백하면 그 답의 남은 문장도 Supertonic으로 읽습니다(답 중간에 목소리가 바뀌지 않게). 그래서 Qwen을 쓸 때도 Supertonic 모델('2. 모델 받기')을 받아 두기를 권합니다. Supertonic 모델이 없으면 폴백 없이 Qwen을 끝까지 기다리므로 바쁠 때 침묵이 길어질 수 있습니다. 문장 끝 쉼·페이드(`TTS_TAIL_MS`/`TTS_FADE_MS`)는 두 엔진 공통입니다.
 
 ## 구성
 
@@ -244,7 +248,7 @@ curl -s http://127.0.0.1:8480/health
 | `server/stt.py` | mlx-whisper 상주(단일 스레드), 교정표·환각 필터 |
 | `server/tts.py` | TTS 상주(단일 스레드), 엔진 선택·폴백·라우드니스 정규화 |
 | `server/supertonic_helper.py` | Supertonic 추론 코드(MIT, `server/SUPERTONIC_CODE_LICENSE.txt`) |
-| `server/tts_qwen.py`, `server/qwen_tts_worker.py` | Qwen3-TTS(기본) 워커 연결·엔진 선택·폴백과 워커 본체 |
+| `server/tts_qwen.py`, `server/qwen_tts_worker.py` | Qwen3-TTS(선택) 워커 연결·엔진 선택·폴백과 워커 본체 |
 | `server/tts_text.py`, `server/tts_lexicon.tsv` | 합성 직전 독음 정규화와 기본 사전(횟수·개수 단위 앞 숫자는 고유어 수사로: "4번"→"네 번", "11시"→"열한 시") |
 | `server/vad.py` | Silero VAD ONNX 스트리밍 래퍼(`SileroVAD`), 말 시작·끝 판정(`Endpointer`) |
 | `server/smart_turn.py` | (선택) Smart Turn v3 ONNX, numpy log-mel(pipecat에서 가져옴, BSD-2/Apache-2.0 표기) |

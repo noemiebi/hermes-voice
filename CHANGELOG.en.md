@@ -6,6 +6,9 @@ What changed in each version, and why. Each entry follows symptom → cause → 
 
 ## 0.6.6 (2026-11-03) — app v48
 
+**Default voice engine is now Supertonic 3 (server)**
+Qwen3-TTS tended to shift tone from sentence to sentence, and tuning its sampling still did not make it satisfying in everyday use. The default is now `TTS_ENGINE=supertonic` (Supertonic 3, voice F1), and the `TTS_SPEED` default is 1.2. The end-of-sentence pause and fades (`TTS_TAIL_MS` 300 ms, `TTS_FADE_MS` 20 ms) apply to both engines. Qwen3-TTS remains an optional engine, enabled with `TTS_ENGINE=qwen` when you want a more natural voice (about 4 GB of memory, separate venv).
+
 **Sentence endings cut off (server)**
 Soft final consonants and last syllables sometimes sounded clipped, as confirmed in device logs and listening tests. The time-stretcher (WSOLA) drops its last leftover frame on flush, and this combined with a regression that left almost no silence at the end of each sentence. The audio is now padded with silence before stretching so that the dropped part is silence, the leading/trailing silence trimmer keeps soft tails (about 120 ms), and the end-of-sentence pause is appended after stretching and resampling at an exact length (`TTS_TAIL_MS`, default 300 ms). The fade (`TTS_FADE_MS`, default 20 ms) is applied at the actual end of the sound, so sentence transitions are smoother.
 

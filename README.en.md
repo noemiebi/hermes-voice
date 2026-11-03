@@ -2,7 +2,7 @@
 
 English · [한국어](README.md)
 
-A local voice server that lets you talk to [Hermes Agent](https://github.com/NousResearch/hermes-agent) running on your Mac, from an iPhone home-screen web app (PWA). Speech recognition (STT) and speech synthesis (TTS) both run on the Mac itself (mlx-whisper large-v3-turbo, Qwen3-TTS (default) / Supertonic 3 (fallback)); no external speech APIs are used. Replies come from Hermes Agent's API server (the `/v1/chat/completions` SSE stream) and are synthesized and played back sentence by sentence as they arrive. Conversation is hands-free, and you can interrupt a reply just by talking over it. The assistant's name can be changed with `AGENT_NAME` (default `Herbot`).
+A local voice server that lets you talk to [Hermes Agent](https://github.com/NousResearch/hermes-agent) running on your Mac, from an iPhone home-screen web app (PWA). Speech recognition (STT) and speech synthesis (TTS) both run on the Mac itself (mlx-whisper large-v3-turbo, Supertonic 3 ONNX (default) / Qwen3-TTS (optional)); no external speech APIs are used. Replies come from Hermes Agent's API server (the `/v1/chat/completions` SSE stream) and are synthesized and played back sentence by sentence as they arrive. Conversation is hands-free, and you can interrupt a reply just by talking over it. The assistant's name can be changed with `AGENT_NAME` (default `Herbot`).
 
 The design lives in [`docs/설계안.md`](docs/설계안.md) (Korean), and the server/client message contract in [`docs/프로토콜.md`](docs/프로토콜.md) (Korean).
 
@@ -10,7 +10,7 @@ The design lives in [`docs/설계안.md`](docs/설계안.md) (Korean), and the s
 
 - An Apple Silicon Mac (mlx-whisper uses MLX)
 - Python 3.12, [uv](https://docs.astral.sh/uv/)
-- Headroom for the default TTS, Qwen3-TTS: about 2 GB of disk (1.7B 8bit model) and about 4 GB of memory while running (separate worker process). If that is too much, see "Lightweight alternative: Supertonic only" below
+- (Optional) If you use Qwen3-TTS: about 2 GB of disk (1.7B 8bit model) and about 4 GB of memory while running (separate worker process). See "Optional: Qwen3-TTS" below
 - [Hermes Agent](https://github.com/NousResearch/hermes-agent) installed, with its API server (`platforms.api_server`) enabled
 - Safari on iPhone (used as a home-screen app)
 - An HTTPS route to the server. Browsers only allow microphone access over HTTPS. [Tailscale](https://tailscale.com/) `serve` is recommended (see "Deployment" below).
@@ -37,16 +37,7 @@ The server reads Hugging Face in offline mode (`HF_HUB_OFFLINE=1`), so models mu
 .venv/bin/hf download mlx-community/whisper-large-v3-turbo
 ```
 
-**Qwen3-TTS (TTS, default)**: 1.7B CustomVoice 8bit, streaming. Because mlx-audio's dependencies conflict with the main `.venv`, it runs as a worker process (`server/qwen_tts_worker.py`) in a separate venv, `.venv-tts`. The model goes into the HF cache (`QWEN_TTS_HF_HOME`, default `$HF_HOME` or `~/.cache/huggingface`). Pick the voice with `QWEN_TTS_VOICE` (default `Sohee`). The model is licensed under Apache-2.0.
-
-```sh
-deploy/install-tts.sh                  # .venv-tts (Python 3.12 + mlx-audio); --force recreates it
-.venv-tts/bin/hf download mlx-community/Qwen3-TTS-12Hz-1.7B-CustomVoice-8bit
-#   to keep the cache elsewhere, prefix with HF_HOME=<path> and set QWEN_TTS_HF_HOME=<path> in .env
-.venv/bin/python tests/smoke_tts_qwen.py   # (optional) first-chunk latency, RTF, memory; wavs go to tests/out/qwen-smoke/
-```
-
-**Supertonic 3 (TTS fallback, recommended)**: reads any sentence that Qwen is late on or fails. The server runs without it, but silences can get long when Qwen is busy (with nowhere to fall back, it waits for Qwen to finish). Download [Supertone/supertonic-3](https://huggingface.co/Supertone/supertonic-3) into `SUPERTONIC_DIR` (default `~/.hermes/voice/models/supertonic3`).
+**Supertonic 3 (TTS, default)**: the default voice engine (voice F1, speaking rate `TTS_SPEED` 1.2x). When you use Qwen3-TTS, it is also the fallback for sentences Qwen is late on or fails. Download [Supertone/supertonic-3](https://huggingface.co/Supertone/supertonic-3) into `SUPERTONIC_DIR` (default `~/.hermes/voice/models/supertonic3`).
 
 ```sh
 .venv/bin/hf download Supertone/supertonic-3 \
@@ -170,13 +161,13 @@ Path variables fall back to their defaults when left empty.
 
 | Name | Default | Description |
 |---|---|---|
-| `TTS_ENGINE` | `qwen` | `qwen`: Qwen3-TTS streaming with per-sentence Supertonic fallback (requires `.venv-tts`; see "2. Download models"). Once a reply falls back, its remaining sentences stay on Supertonic so the voice never changes mid-reply. If the Supertonic model is missing, it waits for Qwen instead of falling back. `supertonic`: Supertonic only (see "Lightweight alternative: Supertonic only" below) |
-| `QWEN_TTS_LEAD_MARGIN_S` | `0.5` | While earlier sentences are still playing, wait for Qwen's first chunk up to (remaining playback - this value), never less than `QWEN_TTS_FIRST_CHUNK_TIMEOUT_S` (2.5 s) |
+| `TTS_ENGINE` | `supertonic` | `supertonic`: Supertonic 3 ONNX only. `qwen` (optional): Qwen3-TTS streaming with per-sentence Supertonic fallback (requires `.venv-tts`; see "Optional: Qwen3-TTS" below). Once a reply falls back, its remaining sentences stay on Supertonic so the voice never changes mid-reply. If the Supertonic model is missing, it waits for Qwen instead of falling back |
+| `QWEN_TTS_LEAD_MARGIN_S` | `0.5` | (Only when `TTS_ENGINE=qwen`; the same goes for every `QWEN_TTS_*` row in this table) While earlier sentences are still playing, wait for Qwen's first chunk up to (remaining playback - this value), never less than `QWEN_TTS_FIRST_CHUNK_TIMEOUT_S` (2.5 s) |
 | `QWEN_TTS_FIRST_CHUNK_MAX_S` | `12` | Upper bound (seconds) for that extended wait |
 | `SUPERTONIC_DIR` | `~/.hermes/voice/models/supertonic3` | Folder containing `onnx/` and `voice_styles/` |
 | `SUPERTONIC_MODEL_DIR` | `$SUPERTONIC_DIR/onnx` | |
 | `SUPERTONIC_VOICE` | `$SUPERTONIC_DIR/voice_styles/F1.json` | Voice |
-| `TTS_SPEED` | `1.3` | Supertonic speaking rate |
+| `TTS_SPEED` | `1.2` | Supertonic speaking rate |
 | `TTS_TAIL_MS` / `TTS_FADE_MS` | `300` / `20` | Both engines. Pause kept after each sentence (ms) and fade at the start/end of speech (ms). The pause is appended after time-stretching, so its length is exact |
 | `TTS_STEPS` | `5` | Supertonic denoising steps |
 | `TTS_PROVIDER` | `cpu` | `coreml` also works, but CPU measured faster |
@@ -230,9 +221,22 @@ The hands-free flow and message formats are described in the "양방향(핸즈�
 - The home-screen app asks for microphone permission every time it's opened (WebKit bug 327237). That's why, while running, the mic track is never stopped, only disabled with `enabled=false`. Setting iOS Settings › Apps › Safari › Microphone › Allow has been reported as a workaround, but this hasn't been verified.
 - While the microphone is in use, call volume applies and audio is quiet (WebKit bug 236219). Adjust with the volume buttons during a conversation, and boost further with "Volume" in settings.
 
-## Lightweight alternative: Supertonic only
+## Optional: Qwen3-TTS
 
-If memory is tight or you would rather not install Qwen3-TTS, add `TTS_ENGINE=supertonic` to `.env` and restart the server. It uses only Supertonic 3 ONNX, so it needs less memory and loads faster, and neither `.venv-tts` nor the Qwen model is required (you still need the Supertonic model from "2. Download models"). The voice is less natural than Qwen3-TTS.
+Supertonic is the default because Qwen3-TTS's tone tends to drift a little from sentence to sentence, but for a more natural voice you can use Qwen3-TTS (1.7B CustomVoice 8bit, streaming). It takes about 2 GB more disk and about 4 GB more memory while running.
+Because mlx-audio's dependencies conflict with the main `.venv`, it runs as a worker process (`server/qwen_tts_worker.py`) in a separate venv, `.venv-tts`. The model is licensed under Apache-2.0.
+
+```sh
+deploy/install-tts.sh                  # .venv-tts (Python 3.12 + mlx-audio); --force recreates it
+.venv-tts/bin/hf download mlx-community/Qwen3-TTS-12Hz-1.7B-CustomVoice-8bit
+#   to keep the cache elsewhere, prefix with HF_HOME=<path> and set QWEN_TTS_HF_HOME=<path> in .env
+.venv/bin/python tests/smoke_tts_qwen.py   # (optional) first-chunk latency, RTF, memory; wavs go to tests/out/qwen-smoke/
+```
+
+To switch, add `TTS_ENGINE=qwen` to `.env` and restart the server.
+Pick the voice with `QWEN_TTS_VOICE` (default `Sohee`) and the model cache with `QWEN_TTS_HF_HOME` (default `$HF_HOME` or `~/.cache/huggingface`). The other `QWEN_TTS_*` variables (speaking rate `QWEN_TTS_TEMPO`, sampling, and so on) are in `server/config.py` and the "TTS 엔진" (TTS engine) section of `docs/프로토콜.md` (Korean).
+
+If Qwen fails or its first chunk is late, that sentence falls back to Supertonic, and once a reply falls back, its remaining sentences stay on Supertonic so the voice never changes mid-reply. So even with Qwen, keeping the Supertonic model (from "2. Download models") is recommended. If the Supertonic model is missing, the server waits for Qwen to finish instead of falling back, so silences can get long when Qwen is busy. The end-of-sentence pause and fades (`TTS_TAIL_MS`/`TTS_FADE_MS`) apply to both engines.
 
 ## Layout
 
@@ -244,7 +248,7 @@ If memory is tight or you would rather not install Qwen3-TTS, add `TTS_ENGINE=su
 | `server/stt.py` | Resident mlx-whisper (single thread), correction table and hallucination filters |
 | `server/tts.py` | Resident TTS (single thread), engine selection, fallback, loudness normalization |
 | `server/supertonic_helper.py` | Supertonic inference code (MIT, `server/SUPERTONIC_CODE_LICENSE.txt`) |
-| `server/tts_qwen.py`, `server/qwen_tts_worker.py` | Qwen3-TTS (default) worker connection, engine selection and fallback, and the worker itself |
+| `server/tts_qwen.py`, `server/qwen_tts_worker.py` | Qwen3-TTS (optional) worker connection, engine selection and fallback, and the worker itself |
 | `server/tts_text.py`, `server/tts_lexicon.tsv` | Pronunciation normalization right before synthesis, and the built-in lexicon (numbers before Korean counters use native Korean numerals: "4번" -> "네 번", "11시" -> "열한 시") |
 | `server/vad.py` | Silero VAD ONNX streaming wrapper (`SileroVAD`), speech start/end detection (`Endpointer`) |
 | `server/smart_turn.py` | (Optional) Smart Turn v3 ONNX, numpy log-mel (taken from pipecat, BSD-2/Apache-2.0 notices) |
