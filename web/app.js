@@ -2,15 +2,16 @@
 // 계약: docs/프로토콜.md
 // 출력 유지(keep-alive): 대화 중 earBus에 -100 dBFS 상수 신호를 흘려 iOS가 재생 끝 무음 때 마이크를 mute하는 것을 줄인다.
 //   끄려면 Safari 콘솔(또는 웹 검사기)에서 localStorage.setItem('hv.keepalive', '0') 후 새로 고침. 다시 켜려면 removeItem.
+// 백그라운드 재생 유지(시도, 0.6.8): 대화 중 무음 <audio id="bgKeep"> 루프 + navigator.mediaSession. 설정 시트 토글(hv.bgAudio).
 'use strict';
 
-const APP_VERSION = '0.6.7';
+const APP_VERSION = '0.6.8';
 const AGENT_NAME_DEFAULT = 'Herbot'; // 서버 ready의 agent_name이 오면 그걸 쓴다
 const KEEPALIVE_LEVEL = 1e-5; // 약 -100 dBFS
 const DIAG_BUF_MAX = 20; // WS가 닫힌 동안 모아 둘 진단 줄 수
 const OUT_RATE_DEFAULT = 44100;
 const TAP_MS = 300; // 이보다 짧게 누르면 토글 모드
-const LS = { session: 'hv.session', model: 'hv.model', aecOff: 'hv.aecOff', ptt: 'hv.ptt', halfDuplex: 'hv.halfDuplex', earcon: 'hv.earcon', showText: 'hv.showText', boost: 'hv.boost', log: 'hv.log', keepalive: 'hv.keepalive', token: 'hv.token' };
+const LS = { session: 'hv.session', model: 'hv.model', aecOff: 'hv.aecOff', ptt: 'hv.ptt', halfDuplex: 'hv.halfDuplex', earcon: 'hv.earcon', showText: 'hv.showText', boost: 'hv.boost', log: 'hv.log', keepalive: 'hv.keepalive', bgAudio: 'hv.bgAudio', token: 'hv.token' };
 
 const $ = (id) => document.getElementById(id);
 const el = {
@@ -22,7 +23,7 @@ const el = {
   textForm: $('textForm'), textInput: $('textInput'), toast: $('toast'),
   menu: $('menu'), menuBtn: $('menuBtn'), menuClose: $('menuClose'),
   newSession: $('newSession'), aec: $('aec'), info: $('info'), infoSummary: $('infoSummary'), sheetVer: $('sheetVer'), appName: $('appName'),
-  pttMode: $('pttMode'), halfDuplex: $('halfDuplex'), earcon: $('earcon'), showText: $('showText'),
+  pttMode: $('pttMode'), halfDuplex: $('halfDuplex'), earcon: $('earcon'), showText: $('showText'), bgAudio: $('bgAudio'), bgKeep: $('bgKeep'),
   boostBtns: [...document.querySelectorAll('.seg-btn[data-boost]')],
   tokenForm: $('tokenForm'), tokenInput: $('tokenInput'),
 };
@@ -134,6 +135,10 @@ const st = {
   trackSuspect: false, // 백그라운드·interrupted가 60초 넘게 이어졌다 복귀함: 다음 무음 판정을 1초로
   awaySince: 0, // visibility hidden 또는 ctx interrupted가 시작된 시각
   keepAlive: null, // 출력 유지 상수 소스(st.sources와 별개: playing·재생 위치·분석기에 안 섞임)
+  mediaHandlers: false, // navigator.mediaSession 액션 핸들러를 걸었음
+  bgKeepWant: false, // 대화 중 무음 <audio>(bgKeep)를 재생하고 있어야 함(외부에서 멈추면 복귀 때 다시 play)
+  rxSec: 0, // 진단: 이 generation에서 받은 오디오 길이(초)
+  rxAt: 0, // 진단: 마지막 오디오 청크를 받은 시각
   diagBuf: [], // WS가 닫힌 동안의 진단 줄 { text, at }
   wsOpens: 0, // ws.onopen 횟수(진단)
   reconnWhy: '', // 마지막 reconnectNow 이유(진단)
@@ -641,6 +646,79 @@ function stopKeepAlive() {
   try { src.disconnect(); } catch { /* */ }
 }
 
+// ---------- 백그라운드 재생 유지(시도, 0.6.8) ----------
+// iOS 홈 화면 앱은 화면이 꺼지거나 다른 앱으로 가면 Web Audio 출력이 멈추거나 끊긴다. 대화 중에는 무음 <audio> 루프(bgKeep)를
+// 사용자 제스처(구체 탭) 안에서 play()해 두고 navigator.mediaSession을 설정해 "미디어 재생 중"으로 보이게 한다.
+// muted=true면 iOS가 오디오 세션을 잡지 않으므로 muted=false + volume 0(iOS는 volume을 무시하지만 파일 자체가 무음).
+// Web Audio 그래프(ctx·keep-alive·재생 체인)와는 연결하지 않는다. 설정 시트 "화면이 꺼져도 재생 유지"(hv.bgAudio, 기본 켬).
+function bgAudioEnabled() {
+  try { return localStorage.getItem(LS.bgAudio) === '1'; } catch { return false; }
+}
+
+// 제스처 안에서 동기로 부를 것(play()는 제스처 밖에서 NotAllowedError가 날 수 있음)
+function bgKeepStart(why) {
+  const a = el.bgKeep;
+  if (!a || !bgAudioEnabled()) return;
+  st.bgKeepWant = true;
+  setMediaSession(true);
+  if (!a.paused) return;
+  a.muted = false;
+  try { a.volume = 0; } catch { /* iOS: 읽기 전용 */ }
+  a.loop = true;
+  let p;
+  try { p = a.play(); } catch (e) { diag(`[bg] 무음 오디오 play 실패(${why}) ${e && e.name} ${e && e.message}`, 'warn'); return; }
+  if (p && typeof p.then === 'function') {
+    p.then(() => diag(`[bg] 무음 오디오 재생(${why})`))
+      .catch((e) => diag(`[bg] 무음 오디오 play 거부(${why}) ${e && e.name} ${e && e.message}`, 'warn'));
+  }
+}
+
+function bgKeepStop(why) {
+  st.bgKeepWant = false;
+  setMediaSession(false);
+  const a = el.bgKeep;
+  if (!a || a.paused) return;
+  try { a.pause(); } catch { /* */ }
+  diag(`[bg] 무음 오디오 멈춤(${why})`);
+}
+
+// 잠금 화면·제어 센터의 미디어 컨트롤: 일시정지·정지 = 대화 끝내기, 재생 = 대화 다시 시작(가능하면)
+function setMediaSession(on) {
+  const ms = navigator.mediaSession;
+  if (!ms) return;
+  try {
+    if (on && typeof MediaMetadata === 'function') {
+      ms.metadata = new MediaMetadata({
+        title: 'Hermes Voice', artist: st.agentName,
+        artwork: [{ src: 'icons/icon-192.png', sizes: '192x192', type: 'image/png' }, { src: 'icons/icon-512.png', sizes: '512x512', type: 'image/png' }],
+      });
+    }
+    ms.playbackState = on ? 'playing' : 'paused';
+  } catch { /* */ }
+  if (st.mediaHandlers) return;
+  st.mediaHandlers = true;
+  const set = (action, fn) => { try { ms.setActionHandler(action, fn); } catch { /* 지원 안 함 */ } };
+  const end = (action) => () => {
+    diag(`[bg] 미디어 컨트롤 ${action}${st.conv ? ': 대화 끝내기' : ''}`);
+    if (st.conv) stopConversation(`미디어 컨트롤 ${action}`);
+    else bgKeepStop(`미디어 컨트롤 ${action}`);
+    render();
+  };
+  set('pause', end('pause'));
+  set('stop', end('stop'));
+  set('play', () => {
+    diag(`[bg] 미디어 컨트롤 play${st.conv ? '' : ': 대화 다시 시작'}`);
+    if (st.conv || st.convStarting) { bgKeepStart('미디어 컨트롤 play'); return; }
+    startConversation('미디어 컨트롤');
+  });
+}
+
+if (el.bgKeep) {
+  // iOS가 통화·다른 앱 오디오로 무음 <audio>를 멈추면 남겨 둔다(복귀 때 recoverAll이 다시 play)
+  el.bgKeep.addEventListener('pause', () => { if (st.bgKeepWant) diag(`[bg] 무음 오디오가 외부에서 멈춤 ${pageDesc()}`, 'warn'); });
+  el.bgKeep.addEventListener('error', () => { const e = el.bgKeep.error; diag(`[bg] 무음 오디오 오류 ${e ? e.code : '-'}`, 'warn'); });
+}
+
 function outGainValue() {
   return st.soundOff ? 0 : st.boost * (st.duck ? st.duck.gain : 1);
 }
@@ -1020,6 +1098,7 @@ function onSpeakStart(gen) {
     stopPlayback();
     st.gen = gen;
     st.pbBaseMs = 0; // 재생 위치는 generation마다 0부터
+    st.rxSec = 0;
   }
   st.speakEnded = false;
 }
@@ -1035,6 +1114,8 @@ function onAudio(buf) {
   const ab = ctx.createBuffer(1, n, st.outRate);
   const ch = ab.getChannelData(0);
   for (let i = 0; i < n; i++) ch[i] = pcm[i] / 32768;
+  st.rxSec += ab.duration;
+  st.rxAt = performance.now();
   if (st.turn) st.turn.firstAudio = true; // 첫 오디오가 나오면 "아직 준비 중" 알림음은 그만
   if (st.held) {
     // hold 중: 재생하지 않고 보관 목록 뒤에 붙인다
@@ -1061,6 +1142,7 @@ function scheduleBuffer(ab) {
   src.onended = () => {
     if (st.sources.has(src)) st.pbBaseMs += ab.duration * 1000;
     st.sources.delete(src);
+    if (st.sources.size === 0) st.lastPlayAt = performance.now(); // 재생 끝 시각(무음 판정 대기 기준)
     if (st.sources.size === 0 && !st.held) {
       reportPlayback('idle');
       render();
@@ -1653,13 +1735,14 @@ function onCaptureMsg(m) {
 // 입력이 디지털 무음(샘플이 정확히 0)으로 이어지면 iOS가 죽은 트랙을 준 것으로 보고 트랙을 다시 받는다
 // (2026-11-03 18:55 실기: 20분 백그라운드 뒤 ctx running·track live·워클릿 동작인데 샘플 전부 0, getUserMedia로 복구).
 // - 시작 직후: 대화 시작 뒤 0이 아닌 샘플도 재생도 없이 0만 ZERO_START_MS(백그라운드 복귀 의심이면 1000) → 바로
-// - 대화 중 한가함: 재생이 아니고 마지막 재생 뒤 ZERO_PLAY_GAP_MS 지난 시점부터 0이 ZERO_IDLE_MS
-// - 재생 중·직후: iOS가 재생 시작·끝 뒤 몇 초 0을 보내다 저절로 돌아오므로(2026-11-03 서버 로그) ZERO_TRACK_MS
+// - 대화 중 한가함: 재생이 아니고 마지막 재생 뒤 ZERO_AFTER_PLAY_MS 지난 시점부터 0이 ZERO_IDLE_MS
+// - 재생 중(소스가 있거나 큐에 재생 시간이 남음)·재생 끝 ZERO_AFTER_PLAY_MS 안: 사다리를 아예 시작하지 않는다(0.6.8).
+//   iOS는 재생 시작 뒤 수 초~수십 초 마이크를 0으로 보내는 게 정상이고, 재생 중 getUserMedia는 오디오 세션을
+//   다시 짜 출력이 끊긴다(2026-11-03 22:10 실기: 재생 중 8초 규칙으로 트랙을 두 번 다시 받아 답이 끊김).
 const ZERO_START_MS = 2000;
 const ZERO_START_SUSPECT_MS = 1000;
 const ZERO_IDLE_MS = 3000;
-const ZERO_PLAY_GAP_MS = 3000;
-const ZERO_TRACK_MS = 8000;
+const ZERO_AFTER_PLAY_MS = 3000;
 const ZERO_RETRY_MS = 20000;
 const ZERO_VERIFY_MS = 1500; // 새 트랙·새 컨텍스트에서 0이 아닌 샘플을 기다리는 시간
 const AWAY_SUSPECT_MS = 60000;
@@ -1708,12 +1791,29 @@ function checkSysHold(now = performance.now()) {
   return false;
 }
 
+// 큐에 남은 재생 시간(초): 예약된 소스의 끝(st.nextTime) - ctx.currentTime
+function queueLeft() {
+  const ctx = st.ctx;
+  if (!ctx || !st.nextTime) return 0;
+  return Math.max(0, st.nextTime - ctx.currentTime);
+}
+
+// 재생 중이거나 재생이 끝난 지 ZERO_AFTER_PLAY_MS 안: 무음 트랙 사다리(getUserMedia·새 컨텍스트) 금지
+function playGuard(now = performance.now()) {
+  if (playing()) return '재생 중';
+  if (queueLeft() > 0.05) return `큐 ${queueLeft().toFixed(1)}초`;
+  if (st.lastPlayAt && now - st.lastPlayAt < ZERO_AFTER_PLAY_MS) return `재생 끝 ${((now - st.lastPlayAt) / 1000).toFixed(1)}초 전`;
+  return '';
+}
+
 function checkDeadTrack(zero, now = performance.now()) {
   if (st.holdSince) { st.zeroSince = 0; return; } // 시스템 음소거·중단 중: 0 샘플을 세지 않음
   if (!st.conv || st.micMuted || !zero || st.micFix || st.convStarting || document.hidden || st.zeroFailed) {
     st.zeroSince = 0;
     return;
   }
+  // 재생 중·재생 끝 3초 안: 0 샘플을 세지 않는다(재생이 끝나고 3초 뒤부터 새로 센다)
+  if (playGuard(now)) { st.zeroSince = 0; return; }
   if (!st.zeroSince) st.zeroSince = now;
   if (st.zeroTriedAt && now - st.zeroTriedAt < ZERO_RETRY_MS) return;
   const dur = now - st.zeroSince;
@@ -1723,13 +1823,10 @@ function checkDeadTrack(zero, now = performance.now()) {
   const resumed = st.holdEndAt && st.zeroSince >= st.holdEndAt; // 외부 중단 복귀 뒤 실제 샘플이 아직 없음
   if (startPhase && dur >= startMs) {
     why = `시작 뒤 ${startMs / 1000}초${st.trackSuspect ? ', 백그라운드 복귀' : ''}`;
-  } else if (resumed && !playing() && dur >= ZERO_IDLE_MS) {
+  } else if (resumed && dur >= ZERO_IDLE_MS) {
     why = `외부 중단 복귀 뒤 ${Math.round(dur / 1000)}초`;
-  } else if (!playing() && now - st.lastPlayAt >= ZERO_PLAY_GAP_MS
-    && now - Math.max(st.zeroSince, st.lastPlayAt + ZERO_PLAY_GAP_MS) >= ZERO_IDLE_MS) {
+  } else if (dur >= ZERO_IDLE_MS) {
     why = `대화 중 ${Math.round(dur / 1000)}초`;
-  } else if (dur > ZERO_TRACK_MS) {
-    why = `재생 중·직후 ${Math.round(dur / 1000)}초`;
   }
   if (!why) return;
   st.zeroTriedAt = now;
@@ -1766,6 +1863,8 @@ async function runZeroFix(why) {
   const extHold = () => { const t = micTrack(); return (t && t.readyState === 'live' && t.muted) || (st.ctx && st.ctx.state === 'interrupted'); };
   const alive = () => st.conv && st.convSeq === seq && !st.micMuted && !extHold();
   if (!alive() || st.zeroFailed) return;
+  const guard = playGuard();
+  if (guard) { st.zeroTriedAt = 0; diag(`[mic] 무음 트랙(${why}): ${guard}이라 트랙 재획득 안 함`); return; }
   const t0 = micTrack();
   diag(`[mic] 무음 트랙(${why}, 0 샘플만): 트랙 다시 받음, muted=${t0 ? t0.muted : '-'} ${micDesc()}`, 'warn');
   toast('마이크를 다시 연결해요');
@@ -1787,6 +1886,8 @@ async function runZeroFix(why) {
   captureCmd('start');
   if (await waitNonZero(t2, ZERO_VERIFY_MS, alive)) { diag(`[mic] 무음 복구됨(트랙 재획득), ${micDesc()}`); return; }
   if (!alive()) return;
+  const guard3 = playGuard();
+  if (guard3) { diag(`[mic] 새 트랙도 0 샘플이지만 ${guard3}: 컨텍스트 재생성 미룸(재생 끝 뒤 다시 판정)`); return; }
   diag(`[mic] 새 트랙도 ${ZERO_VERIFY_MS / 1000}초 동안 0 샘플: 컨텍스트를 새로 만듦, ${micDesc()}`, 'warn');
   const t3 = performance.now();
   if (!await contextStage(`${why}, 새 트랙도 0 샘플`, alive)) { // 실패·탭 대기는 contextStage가 안내
@@ -1884,6 +1985,7 @@ async function startConversation(why = '') {
     return;
   }
   resetConvState();
+  bgKeepStart(why || '대화 시작'); // 제스처 안에서 동기로(무음 <audio> play)
   st.zeroFailed = false; // 무음 복구 실패 표시는 새 대화마다 초기화
   const tap = why === '구체 탭';
   const tapAt = tap ? st.tapAt : 0;
@@ -1912,6 +2014,7 @@ async function startConversation(why = '') {
     st.convStarting = false;
     clearReadyWait();
     diag(`[conv] 시작 실패 ${err && err.name} ${err && err.message}`, 'warn');
+    if (seq === st.convSeq) bgKeepStop('대화 시작 실패');
     toast(micErrorText(err), 7000);
     addLine('sys err', micErrorText(err));
     render();
@@ -1919,7 +2022,7 @@ async function startConversation(why = '') {
   }
   st.convStarting = false;
   if (seq !== st.convSeq) return;
-  if (!st.capture) { clearReadyWait(); render(); return; }
+  if (!st.capture) { clearReadyWait(); bgKeepStop('대화 시작 실패(캡처 없음)'); render(); return; }
   st.conv = true;
   st.convStartAt = performance.now();
   st.vadSpeech = false;
@@ -2000,6 +2103,7 @@ function stopConversation(why = '') {
   st.conv = false;
   clearReadyWait();
   stopKeepAlive();
+  bgKeepStop(why || '대화 끝');
   st.convSeq++; // 진행 중인 전송 복구를 무효로
   st.vadSpeech = false;
   captureCmd('abort'); // 전송 중지
@@ -2151,6 +2255,19 @@ setInterval(() => {
   }
 }, 1000);
 
+// 진단: 재생 큐·수신·화면 상태. q=큐에 남은 재생 초(nextTime - currentTime), rx=이 generation에서 받은 오디오 초(마지막 청크 수신 뒤 경과),
+// out=ctx.outputLatency(ms), vis=document.visibilityState, focus=document.hasFocus(), bg=무음 <audio> 상태
+function pageDesc() {
+  const ctx = st.ctx;
+  const lat = ctx && typeof ctx.outputLatency === 'number' && isFinite(ctx.outputLatency) ? `${Math.round(ctx.outputLatency * 1000)}ms` : '-';
+  let focus = '-';
+  try { focus = document.hasFocus() ? 'Y' : 'N'; } catch { /* */ }
+  const rxAgo = st.rxAt ? `${((performance.now() - st.rxAt) / 1000).toFixed(1)}s 전` : '-';
+  const a = el.bgKeep;
+  const bg = !bgAudioEnabled() ? 'off' : (a ? (a.paused ? 'paused' : 'play') : '-');
+  return `q=${queueLeft().toFixed(1)}s rx=${st.rxSec.toFixed(1)}s(${rxAgo}) out=${lat} vis=${document.visibilityState} focus=${focus} bg=${bg}`;
+}
+
 // 대화 중 2초마다 입력 레벨과 오디오 상태를 콘솔에(화면에는 표시하지 않음)
 function startDiag() {
   stopDiag();
@@ -2172,7 +2289,8 @@ function startDiag() {
       + (t ? `track ${t.readyState} muted=${t.muted} enabled=${t.enabled}` : 'track -')
       + ` pcm ${since} 전 빈입력 ${st.emptyN} 송신 ${micSending() ? 'Y' : 'N'} 재생 ${st.sources.size} ka ${st.keepAlive ? 'on' : 'off'}`
       + ` mute=${st.micMuted} zeros=${st.zeroRunAt ? ((performance.now() - st.zeroRunAt) / 1000).toFixed(1) : '0'}s`
-      + ` sysmute=${st.muteSince ? ((performance.now() - st.muteSince) / 1000).toFixed(1) : '0'}s${st.holdSince ? ' 보류' : ''}`);
+      + ` sysmute=${st.muteSince ? ((performance.now() - st.muteSince) / 1000).toFixed(1) : '0'}s${st.holdSince ? ' 보류' : ''}`
+      + ` ${pageDesc()}`);
     checkSysHold(); // ctx interrupted 동안은 레벨 보고가 없으므로 여기서도 본다
     if (dCt !== null && dCt <= 0 && ctx.state === 'running' && st.conv && !st.micMuted && !st.micFix && !st.convStarting
       && !document.hidden && !playing() && !st.ctxPending && st.convRebuilds < CTX_REBUILD_MAX) {
@@ -2386,6 +2504,7 @@ el.menuBtn.addEventListener('click', () => {
   el.pttMode.checked = st.ptt;
   el.halfDuplex.checked = st.halfDuplex;
   el.earcon.checked = st.earcon;
+  if (el.bgAudio) el.bgAudio.checked = bgAudioEnabled();
   el.menu.hidden = false;
 });
 el.menuClose.addEventListener('click', () => { el.menu.hidden = true; });
@@ -2431,6 +2550,14 @@ el.earcon.addEventListener('change', () => {
   localStorage.setItem(LS.earcon, st.earcon ? '1' : '0');
   if (st.earcon) { ensureContext(); earcon('heard'); } // 미리 들려 주기
 });
+if (el.bgAudio) el.bgAudio.addEventListener('change', () => {
+  const on = el.bgAudio.checked;
+  try { localStorage.setItem(LS.bgAudio, on ? '1' : '0'); } catch { /* */ }
+  diag(`[bg] 설정 화면이 꺼져도 재생 유지 ${on ? '켬' : '끔'}`);
+  if (!on) bgKeepStop('설정 끔');
+  else if (st.conv) bgKeepStart('설정 켬'); // 토글 탭이 제스처
+  toast(on ? '화면이 꺼져도 재생을 유지해 볼게요.' : '화면이 꺼지면 재생이 멈출 수 있어요.');
+});
 el.showText.addEventListener('change', () => {
   st.showText = el.showText.checked;
   localStorage.setItem(LS.showText, st.showText ? '1' : '0');
@@ -2469,6 +2596,7 @@ async function recoverAll(why) {
     return;
   }
   await recoverContext();
+  if (st.bgKeepWant && el.bgKeep && el.bgKeep.paused) bgKeepStart(`복귀 ${why}`); // 외부(통화·다른 앱)에서 멈춘 경우
   await recoverMic();
   if (await checkCtxStall(why) && st.conv && !playing() && !st.micMuted) fixMic(`복귀 ${why}: ct 정지`, true);
   if (!st.wsOpen) reconnectNow(`복귀 ${why}(복구 뒤)`);
@@ -2491,6 +2619,7 @@ async function checkCtxStall(why) {
 }
 
 document.addEventListener('visibilitychange', () => {
+  diag(`[page] visibility ${document.visibilityState}${st.conv ? ' conv' : ''} 재생 ${st.sources.size} ${pageDesc()}`);
   if (document.hidden) {
     // 누르고 말하기 중이던 발화만 마무리. 대화·재생·마이크·연결은 그대로 둔다.
     if (st.listening) stopListening();
@@ -2504,8 +2633,17 @@ document.addEventListener('visibilitychange', () => {
     onForeground('visible');
   }
 });
-window.addEventListener('pageshow', () => onForeground('pageshow'));
-window.addEventListener('focus', () => onForeground('focus'));
+window.addEventListener('pageshow', (e) => {
+  diag(`[page] pageshow persisted=${!!(e && e.persisted)}${st.conv ? ' conv' : ''} ${pageDesc()}`);
+  onForeground('pageshow');
+});
+window.addEventListener('focus', () => {
+  diag(`[page] focus${st.conv ? ' conv' : ''} 재생 ${st.sources.size} ${pageDesc()}`);
+  onForeground('focus');
+});
+window.addEventListener('blur', () => {
+  diag(`[page] blur${st.conv ? ' conv' : ''} 재생 ${st.sources.size} ${pageDesc()}`);
+});
 
 // 진단: 아이폰이 보는 화면·뷰포트·안전 영역 크기(hello에 실어 서버 로그로 확인)
 function viewportInfo() {
@@ -2537,6 +2675,7 @@ document.addEventListener('pointerdown', () => {
   if (st.ctx && st.ctx.state !== 'running') st.ctx.resume().catch(() => {});
 }, true);
 window.addEventListener('pagehide', (e) => {
+  diag(`[page] pagehide persisted=${!!e.persisted}${st.conv ? ' conv' : ''} ${pageDesc()}`);
   if (e.persisted) return; // bfcache로 들어가면 그대로 둔다
   // 페이지를 완전히 닫을 때만 정리
   if (st.listening) stopListening();

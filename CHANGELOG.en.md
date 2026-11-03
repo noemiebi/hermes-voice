@@ -4,6 +4,12 @@ English · [한국어](CHANGELOG.md)
 
 What changed in each version, and why. Each entry follows symptom → cause → change. "App vNN" is the web app's service worker version; reopening the home-screen app picks up the new version. Entries that only touch the server are marked **(server)** and take effect after a server restart. Defaults and meanings of environment variables are in the [README](README.en.md#environment-variables-env).
 
+## 0.6.8 (2026-11-03) — app v50
+
+**Audio kept cutting out during playback**
+Speech kept breaking up while an answer was playing (iPhone, 2026-11-03 22:10). iOS normally feeds the mic as all-zero samples for seconds to tens of seconds during playback, but the dead-track recovery's "8 s during playback" rule re-acquired the mic track (`getUserMedia`) twice mid-answer, which makes iOS rebuild its audio session and briefly stalls output. The recovery now never starts while audio is playing (sources scheduled or time left in the queue) or within 3 s after playback ends; it only runs if zeros continue for another 3 s after that. To narrow down remaining causes, the 2-second diagnostic line now includes queued playback time (`q=`), received audio length (`rx=`), output latency (`out=`), visibility (`vis=`) and focus (`focus=`), and visibility changes, `pagehide`/`pageshow` and `blur`/`focus` are all logged.
+As an **attempt** at keeping audio going when the screen turns off or you switch apps, the app now plays a silent audio loop during a conversation and shows lock-screen media info ("Hermes Voice"); pausing from the lock screen ends the conversation. Whether this helps still has to be confirmed on a device; turn it off with "Keep playing when the screen is off" in the settings sheet (off by default (turn it on in Settings to try it)).
+
 ## 0.6.7 (2026-11-03) — app v49
 
 **Sentences felt like they started or ended abruptly**
