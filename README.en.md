@@ -139,6 +139,10 @@ Path variables fall back to their defaults when left empty.
 | `VOICE_TOKEN` | (empty = no auth) | Access token. **Required** if exposed outside Tailscale (on the public internet) |
 | `VOICE_ALLOWED_ORIGINS` | (empty) | Other origins allowed to connect to `/ws` (comma-separated, e.g. `https://a.example:8443`, or `*`). Same-origin clients and clients without an Origin header are always allowed |
 | `VOICE_SESSION_IDLE_HOURS` | `0` (off) | If positive, starting a conversation this long after the last turn opens a new Hermes session. Never switches mid-conversation. When off, a new conversation only starts via the on-screen `+` button |
+| `FILLER_ENABLED` | `1` | Short filler lines ("잠깐 확인해 볼게요." etc.) while waiting a long time for an answer. `0` turns them all off (including the one on tool start) |
+| `FILLER_FIRST_S` | `4.0` | Seconds before the first filler while no token has arrived (immediately on a tool-start event) |
+| `FILLER_EVERY_S` | `8.0` | Interval between further fillers until the first token. Skipped while the previous filler is still playing |
+| `FILLER_MAX` | `4` | Maximum fillers per turn |
 | `VOICE_DATA_DIR` | `~/.hermes/voice` | Server data folder (created if missing). Holds conversation history and the last session (`history.json`), the user pronunciation lexicon, and the STT correction table |
 | `PORT` / `HOST` | `8480` / `127.0.0.1` | Bind address. Expose externally through a reverse proxy (tailscale serve, etc.) |
 

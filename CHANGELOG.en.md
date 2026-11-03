@@ -4,6 +4,11 @@ English · [한국어](CHANGELOG.md)
 
 What changed in each version, and why. Each entry follows symptom → cause → change. "App vNN" is the web app's service worker version; reopening the home-screen app picks up the new version. Entries that only touch the server are marked **(server)** and take effect after a server restart. Defaults and meanings of environment variables are in the [README](README.en.md#environment-variables-env).
 
+## 0.6.7 (2026-11-03) — server
+
+**Fillers during long waits (server)**
+When a search or tool call ran long, you waited 10 to almost 30 seconds in silence for the first answer (measured first tokens: 8.9, 18.9, 27.6 s). The only filler was a single line on tool start ("잠깐 확인해 볼게요."). Now, before the first token, the first filler plays immediately on a tool-start event or after 4 seconds (`FILLER_FIRST_S`) without one, then one more every 8 seconds (`FILLER_EVERY_S`) until the answer arrives, up to 4 per turn (`FILLER_MAX`). Lines follow the tool in use ("웹에서 찾아보는 중이에요, 조금만요." — searching the web; "메일을 보고 있어요, 조금만요." — reading mail, etc.), otherwise generic lines ("아직 찾는 중이에요, 조금만요." → "시간이 좀 걸리네요, 잠시만요." …) without repeats. When the answer arrives, fillers not yet spoken are skipped, and fillers are left out of the cut-answer note (what the user heard). `FILLER_ENABLED=0` turns them all off.
+
 ## 0.6.6 (2026-11-03) — app v48
 
 **Default voice engine is now Supertonic 3 (server)**

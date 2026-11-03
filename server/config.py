@@ -99,6 +99,13 @@ QWEN_TTS_TURN_SEED = os.environ.get("QWEN_TTS_TURN_SEED", "0").strip().lower() i
 TTS_ENGLISH_MODE = os.environ.setdefault("TTS_ENGLISH_MODE", "keep").strip().lower()
 TTS_LEXICON_USER = os.environ.setdefault("TTS_LEXICON_USER", str(VOICE_DATA_DIR / "tts-lexicon.tsv"))
 
+# 긴 대기 중 채움 말(docs/프로토콜.md '채움 말'): 첫 토큰 전 FILLER_FIRST_S(도구 시작 이벤트가 오면 즉시)에 첫 마디,
+# 그 뒤 첫 토큰까지 FILLER_EVERY_S마다 하나씩, 한 턴에 FILLER_MAX개까지. FILLER_ENABLED=0이면 채움 말 전부 끔
+FILLER_ENABLED = os.environ.get("FILLER_ENABLED", "1").strip().lower() not in ("", "0", "false", "no", "off")
+FILLER_FIRST_S = float(os.environ.get("FILLER_FIRST_S", "4.0"))
+FILLER_EVERY_S = float(os.environ.get("FILLER_EVERY_S", "8.0"))
+FILLER_MAX = int(os.environ.get("FILLER_MAX", "4"))
+
 # 스피커 에코 대책 (docs/프로토콜.md '에코 대책')
 HOLD_CONFIRM_MS = int(os.environ.get("HOLD_CONFIRM_MS", "900"))   # 잠정 끼어들기 뒤 이만큼 말이 이어지면 확정
 ECHO_TAIL_MS = int(os.environ.get("ECHO_TAIL_MS", "1500"))        # 재생 끝난 뒤 에코 꼬리 가드 시간

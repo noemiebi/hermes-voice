@@ -6,6 +6,7 @@ import hmac
 import json
 import logging
 import random
+import re
 import struct
 import time
 from typing import Optional
@@ -29,7 +30,43 @@ log = logging.getLogger("session")
 
 MODELS = ("voice-fast", "voice-deep")
 MODEL_DISPLAY = config.MODEL_LABELS  # 환경변수 MODEL_LABEL_FAST/DEEP(비우면 노트 생략)
-FILLERS = ("잠깐 확인해 볼게요.", "잠시만요, 찾아볼게요.", "확인해 볼게요, 잠깐만요.")
+FILLERS = ("잠깐 확인해 볼게요.", "잠시만요, 찾아볼게요.", "확인해 볼게요, 잠깐만요.")  # 첫 채움 말
+# 도구 문맥 채움 말(키는 web/app.js TOOL_KO와 같음, `mcp__<서버>__<도구>`는 서버 이름으로). 뒤에 FILLER_TOOL_TAIL을 붙인다
+FILLER_BY_TOOL = {
+    "web_search": "웹에서 찾아보는 중이에요", "web_extract": "웹에서 찾아보는 중이에요",
+    "gmail_readonly": "메일을 보고 있어요", "naver_mail": "메일을 보고 있어요",
+    "apple_calendar": "일정을 확인하고 있어요", "korea_workday": "일정을 확인하고 있어요",
+    "apple_reminders": "미리 알림을 보고 있어요", "apple_notes": "메모를 찾아보고 있어요",
+    "memory": "지난 이야기를 떠올리는 중이에요", "session_search": "지난 이야기를 떠올리는 중이에요",
+    "terminal": "맥에서 돌려 보는 중이에요", "process_manage": "맥에서 돌려 보는 중이에요",
+    "weather": "날씨를 확인하고 있어요",
+}
+FILLER_TOOL_TAIL = ", 조금만요."
+# 일반 채움 말(도구 모름·같은 문구 두 번째부터). 한 턴 안에서 순서대로 소진(반복 없음)
+FILLER_GENERIC = ("아직 찾는 중이에요, 조금만요.", "시간이 좀 걸리네요, 잠시만요.", "거의 다 됐어요.", "조금만 더 기다려 주세요.")
+FILLER_TEXTS = frozenset(FILLERS) | frozenset(v + FILLER_TOOL_TAIL for v in FILLER_BY_TOOL.values()) | frozenset(FILLER_GENERIC)
+_TOOL_HIDDEN = frozenset(("tool_describe", "tool_search", "tool_call"))  # 헤르메스 내부 도구(문맥 없음, web/app.js와 같음)
+_MCP_RE = re.compile(r"^mcp__([^_]+(?:_[^_]+)*?)__(.+)$")
+
+
+class _Filler(str):
+    """큐에 넣는 채움 말 표시(값은 그냥 문구). 답 문장이 우연히 같은 글이어도 채움 말로 오인하지 않게 타입으로 구분."""
+
+
+def _is_filler(item) -> bool:
+    return isinstance(item, _Filler)
+
+
+def filler_for_tool(name: str) -> Optional[str]:
+    """도구 이름에 맞는 채움 말(꼬리 포함). 모르는 도구·내부 도구면 None."""
+    if not name or name in _TOOL_HIDDEN:
+        return None
+    m = _MCP_RE.match(name)
+    key = m.group(1) if m else name
+    phrase = FILLER_BY_TOOL.get(key)
+    return phrase + FILLER_TOOL_TAIL if phrase else None
+
+
 CHUNK_SAMPLES = OUT_RATE // 2          # 약 0.5초씩 전송
 MAX_UTTERANCE_BYTES = 16000 * 2 * 90   # 90초
 _END = object()                        # 턴 끝 표시
@@ -67,6 +104,7 @@ class VoiceSession:
         self.listening = False
         self.audio = bytearray()
         self.turn_task: Optional[asyncio.Task] = None
+        self._filler_task: Optional[asyncio.Task] = None  # 긴 대기 채움 말 스케줄러(_think)
         self.queue: asyncio.Queue = asyncio.Queue()
         self.speaker_task: Optional[asyncio.Task] = None
         self._send_lock = asyncio.Lock()
@@ -1024,7 +1062,17 @@ class VoiceSession:
             await self.send_json({"type": "error", "message": f"모르는 메시지: {t}"})
 
     # ---------- 끼어들기 ----------
+    def _cancel_filler(self) -> None:
+        task, self._filler_task = self._filler_task, None
+        if task and not task.done() and task is not asyncio.current_task():
+            task.cancel()
+
+    def _filler_busy(self, gen: int) -> bool:
+        """앞서 넣은 말이 아직 큐에 있거나 합성·재생 중인지(그러면 다음 채움 말을 미룬다)."""
+        return (not self.queue.empty()) or self._speaking_now or self._play_lead_s(gen) > 0.3
+
     async def _cancel_turn(self) -> None:
+        self._cancel_filler()
         task, self.turn_task = self.turn_task, None
         if task and not task.done():
             task.cancel()
@@ -1155,9 +1203,10 @@ class VoiceSession:
             text = f"{self._interrupt_note}\n{text}"
             log.info("끊긴 답 노트 붙임: %s", self._interrupt_note)
             self._interrupt_note = None
-        self._answer = {"gen": gen, "heard": [], "done": False, "thinking": True}
-        spoke = {"any": False, "filler": False}
+        self._answer = {"gen": gen, "heard": [], "done": False, "thinking": True, "first_tok": False}
+        spoke = {"any": False}
         first = {"tok": None}
+        fill = {"tool": None, "used": set(), "generic": 0, "n": 0, "wake": asyncio.Event()}
 
         def enqueue(sentence: str) -> None:
             spoke["any"] = True
@@ -1168,6 +1217,8 @@ class VoiceSession:
                 return
             if first["tok"] is None:
                 first["tok"] = time.perf_counter()
+                self._answer["first_tok"] = True  # 큐의 안 읽은 채움 말은 _speaker가 건너뜀
+                self._cancel_filler()
                 log.info("첫 토큰 %.0f ms (턴 시작부터)", (first["tok"] - t0) * 1000)
             await self.send_json({"type": "assistant_delta", "text": delta})
             for s in splitter.feed(delta):
@@ -1180,10 +1231,53 @@ class VoiceSession:
             if call_id:
                 msg["toolCallId"] = call_id  # 클라이언트가 같은 도구의 여러 호출을 짝지어 칩 하나로 합치는 데 씀
             await self.send_json(msg)
-            if state == "started" and not spoke["any"] and not spoke["filler"]:
-                spoke["filler"] = True
-                enqueue(random.choice(FILLERS))
+            if state == "started" and first["tok"] is None:
+                tf = filler_for_tool(name)
+                if tf:
+                    fill["tool"] = tf
+                fill["wake"].set()
 
+        def say_filler(t: str) -> None:
+            fill["n"] += 1
+            log.info("채움 말 %d: %s", fill["n"], t)
+            enqueue(_Filler(t))
+
+        def next_filler() -> Optional[str]:
+            tf = fill["tool"]
+            if tf and tf not in fill["used"]:
+                fill["used"].add(tf)
+                return tf
+            if fill["generic"] < len(FILLER_GENERIC):
+                fill["generic"] += 1
+                return FILLER_GENERIC[fill["generic"] - 1]
+            return None
+
+        def live() -> bool:
+            return gen == self.generation and first["tok"] is None
+
+        async def filler_loop() -> None:
+            """첫 토큰 전 긴 대기를 채움 말로 메운다(docs/프로토콜.md '채움 말')."""
+            try:
+                await asyncio.wait_for(fill["wake"].wait(), config.FILLER_FIRST_S)
+            except asyncio.TimeoutError:
+                pass
+            if not live() or spoke["any"] or config.FILLER_MAX < 1:
+                return
+            say_filler(random.choice(FILLERS))
+            while fill["n"] < config.FILLER_MAX:
+                await asyncio.sleep(config.FILLER_EVERY_S)
+                if not live():
+                    return
+                if self._filler_busy(gen):
+                    continue  # 직전 채움 말이 아직 재생·대기 중이면 이번 간격은 건너뜀
+                t = next_filler()
+                if t is None:
+                    return
+                say_filler(t)
+
+        self._cancel_filler()
+        if config.FILLER_ENABLED:
+            self._filler_task = asyncio.create_task(filler_loop())
         try:
             result = await self.hermes.chat_stream(text, self.session_id, self.model, on_delta, on_tool)
         except (HermesError, httpx.HTTPError) as e:
@@ -1193,6 +1287,8 @@ class VoiceSession:
             await self.send_json({"type": "error", "message": msg})
             self.queue.put_nowait((gen, _END))
             return
+        finally:
+            self._cancel_filler()
         if gen != self.generation:
             return
         for s in splitter.flush():
@@ -1271,7 +1367,7 @@ class VoiceSession:
                     if not self.holding:  # 덕킹 hold 중에는 판정 상태(listening)를 유지
                         await self.set_state("speaking")
                     await self.send_json({"type": "speak_start", "generation": gen, "text": item})
-                    if self._answer["gen"] == gen and item not in FILLERS:
+                    if self._answer["gen"] == gen and not _is_filler(item):
                         self._answer["heard"].append(item)
                     if self._sched_gen != gen:
                         self._sched_gen, self._sched = gen, []
@@ -1317,6 +1413,9 @@ class VoiceSession:
                         self._tail_until = max(self._tail_until, max(self._play_until, self.clock()) + self.echo_tail_s)
                 await self.set_state(self.rest_state())
                 continue
+            if _is_filler(item) and self._answer["gen"] == gen and self._answer.get("first_tok"):
+                log.info("채움 말 건너뜀: 답 도착: %s", item)
+                continue
             if not self.tts.loaded:
                 await self.send_json({"type": "error", "message": "TTS가 아직 준비되지 않았어요"})
                 continue
@@ -1354,7 +1453,7 @@ class VoiceSession:
                     await self.set_state("speaking")
                 await self.send_json({"type": "speak_start", "generation": gen, "text": item})
                 self.aec_ref.add(gen, pcm)  # 에코 대조용 참조(이 generation 위치 0부터 이어 붙임)
-                if self._answer["gen"] == gen and item not in FILLERS:
+                if self._answer["gen"] == gen and not _is_filler(item):
                     self._answer["heard"].append(item)
                 sent_gen = gen
                 if self._sched_gen != gen:

@@ -139,6 +139,10 @@ curl -s http://127.0.0.1:8480/health
 | `VOICE_TOKEN` | (빈 값 = 인증 없음) | 접속 토큰. Tailscale 밖(공개망)에 열면 **필수** |
 | `VOICE_ALLOWED_ORIGINS` | (빈 값) | `/ws`에 붙어도 되는 다른 출처(쉼표 구분, 예: `https://a.example:8443`, 또는 `*`). 같은 출처와 Origin 없는 클라이언트는 늘 허용 |
 | `VOICE_SESSION_IDLE_HOURS` | `0` (끔) | 양수면 마지막 턴 뒤 이만큼 지나 대화를 시작할 때 새 Hermes 세션. 대화 중에는 바꾸지 않음. 끄면 새 대화는 화면의 `+` 버튼으로만 |
+| `FILLER_ENABLED` | `1` | 답을 오래 기다릴 때 채움 말("잠깐 확인해 볼게요." 등). `0`이면 전부 끔(도구 시작 때 한마디 포함) |
+| `FILLER_FIRST_S` | `4.0` | 첫 토큰 전 첫 채움 말까지 초(도구 시작 이벤트가 오면 즉시) |
+| `FILLER_EVERY_S` | `8.0` | 그 뒤 첫 토큰까지 채움 말 간격(초). 앞 채움 말이 아직 재생 중이면 그 간격은 건너뜀 |
+| `FILLER_MAX` | `4` | 한 턴의 채움 말 최대 개수 |
 | `VOICE_DATA_DIR` | `~/.hermes/voice` | 서버 데이터 폴더(없으면 만듦). 대화 기록·마지막 세션 `history.json`, 사용자 독음 사전, STT 교정표 |
 | `PORT` / `HOST` | `8480` / `127.0.0.1` | 바인드. 외부 노출은 리버스 프록시(tailscale serve 등)로 |
 
