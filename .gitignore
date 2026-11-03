@@ -14,3 +14,4 @@ tests/out/
 extras/**/*.wav
 extras/
 docs/설계안-작업일지.md
+web/samples/

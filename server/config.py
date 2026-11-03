@@ -79,6 +79,9 @@ QWEN_TTS_GAIN_DB = float(os.environ.get("QWEN_TTS_GAIN_DB", "2.5"))
 # 말투 지시(1.7B CustomVoice만, 0.6B는 무시됨). mlx-audio의 speed 인자는 Qwen3-TTS에서 쓰이지 않음(TTS_SPEED는 Supertonic 전용).
 # 말 속도: 음높이를 유지하는 시간 신축(WSOLA, audiotsm)을 스트리밍 청크에 적용. 1.0이면 우회.
 QWEN_TTS_TEMPO = float(os.environ.get("QWEN_TTS_TEMPO", "1.2"))
+# WSOLA 조각 길이·탐색 범위(ms). 짧으면 이음매가 잦아 1.3배에서 들쭉날쭉(실청 비교로 40/15 선택, 2026-11-03)
+QWEN_TTS_TSM_FRAME_MS = float(os.environ.get("QWEN_TTS_TSM_FRAME_MS", "40"))
+QWEN_TTS_TSM_TOL_MS = float(os.environ.get("QWEN_TTS_TSM_TOL_MS", "15"))
 QWEN_TTS_INSTRUCT = os.environ.get("QWEN_TTS_INSTRUCT", "").strip()
 # 독음 정규화(server/tts_text.py): 사전에 없는 영어 단어를 그대로(keep) 둘지 글자별로(spell) 읽을지, 사용자 사전 경로
 TTS_ENGLISH_MODE = os.environ.setdefault("TTS_ENGLISH_MODE", "keep").strip().lower()

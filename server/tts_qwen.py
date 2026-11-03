@@ -6,7 +6,7 @@ Qwen3-TTS는 mlx-audio가 필요해 별도 venv(.venv-tts)의 서브프로세스
 
 신호 처리(청크 단위, 경계 연속):
   앞뒤 무음 정리(SilenceTrimmer, 24 kHz 원신호 기준 -45 dBFS: 앞 60 ms·뒤 120 ms만 남김)
-  -> 말 속도 QWEN_TTS_TEMPO배(TempoStretcher, WSOLA로 음높이 유지, 24 kHz)
+  -> 말 속도 QWEN_TTS_TEMPO배(TempoStretcher, WSOLA 40 ms 조각으로 음높이 유지, 24 kHz)
   -> 상태 있는 리샘플(StreamResampler, resample_poly 147/80과 같은 결과)
   -> 고정 이득(QWEN_TTS_GAIN_DB) -> 소프트 리미터(-1 dBFS 넘지 않음, 하드 클립 없음) -> int16.
 텍스트는 session.py가 normalize_for_tts로 만든 결과를 그대로 받는다(여기서 다시 하지 않음).
@@ -144,17 +144,19 @@ class SilenceTrimmer:
 
 
 class TempoStretcher:
-    """음높이를 유지한 채 말 속도를 tempo배로(WSOLA, audiotsm). 프레임 20 ms·겹침 50%·탐색 ±5 ms.
+    """음높이를 유지한 채 말 속도를 tempo배로(WSOLA, audiotsm). 조각 QWEN_TTS_TSM_FRAME_MS(기본 40 ms)·겹침 50%·탐색 ±QWEN_TTS_TSM_TOL_MS(기본 15 ms).
     한 객체가 청크 사이 상태를 들고 있어 청크로 나눠 넣어도 한 번에 넣은 것과 같은 결과(이음매 없음).
     tempo == 1.0이면 그대로 통과."""
 
-    def __init__(self, sr: int, tempo: float = 1.0):
+    def __init__(self, sr: int, tempo: float = 1.0, frame_ms: float = config.QWEN_TTS_TSM_FRAME_MS,
+                 tol_ms: float = config.QWEN_TTS_TSM_TOL_MS):
         self.tempo = tempo
         self.tsm = None
         if abs(tempo - 1.0) > 1e-6:
             from audiotsm import wsola
-            self.tsm = wsola(1, speed=tempo, frame_length=int(sr * 0.02), synthesis_hop=int(sr * 0.01),
-                             tolerance=int(sr * 0.005))
+            fl = max(2, int(sr * frame_ms / 1000))
+            self.tsm = wsola(1, speed=tempo, frame_length=fl, synthesis_hop=fl // 2,
+                             tolerance=int(sr * tol_ms / 1000))
 
     def push(self, a: np.ndarray) -> np.ndarray:
         a = np.asarray(a, dtype=np.float32).reshape(-1)
