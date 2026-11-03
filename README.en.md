@@ -177,6 +177,7 @@ Path variables fall back to their defaults when left empty.
 | `SUPERTONIC_MODEL_DIR` | `$SUPERTONIC_DIR/onnx` | |
 | `SUPERTONIC_VOICE` | `$SUPERTONIC_DIR/voice_styles/F1.json` | Voice |
 | `TTS_SPEED` | `1.3` | Supertonic speaking rate |
+| `TTS_TAIL_MS` / `TTS_FADE_MS` | `300` / `20` | Both engines. Pause kept after each sentence (ms) and fade at the start/end of speech (ms). The pause is appended after time-stretching, so its length is exact |
 | `TTS_STEPS` | `5` | Supertonic denoising steps |
 | `TTS_PROVIDER` | `cpu` | `coreml` also works, but CPU measured faster |
 | `TTS_TARGET_RMS_DB` / `TTS_PEAK_DB` | `-18` / `-1` | Loudness normalization of synthesized audio (RMS target over voiced segments, peak ceiling) |
@@ -298,6 +299,10 @@ deploy/install.sh serve     # tailscale serve: https://<Tailscale name>:8464 -> 
 - CORS does not apply to WebSockets, so if the server runs without a token, any web page opened in a browser on the same device could connect to `ws://127.0.0.1:8480/ws` and send commands to Hermes. To prevent this, the server checks `Origin` on `/ws` connections and accepts only same-origin connections (same host and port as the address being accessed) and non-browser clients that send no `Origin`; everything else is rejected (HTTP 403). If you need to use it from a page on another origin, add that origin to `VOICE_ALLOWED_ORIGINS`.
 - It's a **single-user design**. There is only one Hermes session and one conversation history (`history.json`) for the whole app, so multiple people connecting to the same server share the same conversation.
 - Keep `HERMES_API_KEY` and `VOICE_TOKEN` only in `.env` and never commit them to git (it's in `.gitignore`). `STT_SAVE_CLIPS_DIR` (default `tests/clips`) accumulates recordings of your voice, so set it to an empty value if you don't want that.
+
+## Changelog
+
+What changed in each version, and why, is in [`CHANGELOG.en.md`](CHANGELOG.en.md).
 
 ## License
 

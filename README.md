@@ -177,6 +177,7 @@ curl -s http://127.0.0.1:8480/health
 | `SUPERTONIC_MODEL_DIR` | `$SUPERTONIC_DIR/onnx` | |
 | `SUPERTONIC_VOICE` | `$SUPERTONIC_DIR/voice_styles/F1.json` | 음색 |
 | `TTS_SPEED` | `1.3` | Supertonic 말 속도 |
+| `TTS_TAIL_MS` / `TTS_FADE_MS` | `300` / `20` | 두 엔진 공통. 문장 끝에 남기는 쉼(ms)과 소리 시작·끝 페이드(ms). 쉼은 속도 신축 뒤에 정확한 길이로 붙음 |
 | `TTS_STEPS` | `5` | Supertonic 디노이징 단계 |
 | `TTS_PROVIDER` | `cpu` | `coreml`도 되지만 측정상 CPU가 더 빠름 |
 | `TTS_TARGET_RMS_DB` / `TTS_PEAK_DB` | `-18` / `-1` | 합성 결과 라우드니스 정규화(음성 구간 RMS 목표, 피크 상한) |
@@ -298,6 +299,10 @@ deploy/install.sh serve     # tailscale serve: https://<Tailscale 이름>:8464 -
 - WebSocket에는 CORS가 적용되지 않아, 토큰 없이 띄우면 같은 기기 브라우저에서 연 아무 웹페이지가 `ws://127.0.0.1:8480/ws`에 붙어 Hermes에 명령을 넣을 수 있습니다. 그래서 서버는 `/ws` 연결 때 `Origin`을 검사해 같은 출처(접속한 주소와 같은 호스트·포트)와 `Origin`이 없는 비브라우저 클라이언트만 받고, 나머지는 거부합니다(HTTP 403). 다른 출처의 페이지에서 써야 하면 `VOICE_ALLOWED_ORIGINS`에 그 origin을 넣으세요.
 - **1인용 설계**입니다. Hermes 세션과 대화 기록(`history.json`)이 앱 전체에 하나뿐이라, 여러 사람이 같은 서버에 접속하면 같은 대화를 공유합니다.
 - `HERMES_API_KEY`와 `VOICE_TOKEN`은 `.env`에만 두고 git에 올리지 마세요(`.gitignore`에 포함). `STT_SAVE_CLIPS_DIR`(기본 `tests/clips`)에는 내 목소리 녹음이 쌓이니, 원치 않으면 빈 값으로 끄세요.
+
+## 변경 내역
+
+버전별로 무엇을 왜 바꿨는지는 [`CHANGELOG.md`](CHANGELOG.md)에 있습니다.
 
 ## 라이선스
 

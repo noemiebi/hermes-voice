@@ -1,0 +1,78 @@
+# Changelog
+
+English · [한국어](CHANGELOG.md)
+
+What changed in each version, and why. Each entry follows symptom → cause → change. "App vNN" is the web app's service worker version; reopening the home-screen app picks up the new version. Entries that only touch the server are marked **(server)** and take effect after a server restart. Defaults and meanings of environment variables are in the [README](README.en.md#environment-variables-env).
+
+## 0.6.6 (2026-11-03) — app v48
+
+**Sentence endings cut off (server)**
+Soft final consonants and last syllables sometimes sounded clipped, as confirmed in device logs and listening tests. The time-stretcher (WSOLA) drops its last leftover frame on flush, and this combined with a regression that left almost no silence at the end of each sentence. The audio is now padded with silence before stretching so that the dropped part is silence, the leading/trailing silence trimmer keeps soft tails (about 120 ms), and the end-of-sentence pause is appended after stretching and resampling at an exact length (`TTS_TAIL_MS`, default 300 ms). The fade (`TTS_FADE_MS`, default 20 ms) is applied at the actual end of the sound, so sentence transitions are smoother.
+
+**Tone varies from sentence to sentence (server)**
+Even within one reply, timbre and intonation could shift between sentences. Qwen3-TTS samples each sentence independently (model default temperature 0.9). The sampling parameters `QWEN_TTS_TEMPERATURE`, `QWEN_TTS_TOP_K`, `QWEN_TTS_TOP_P` are now exposed, along with `QWEN_TTS_TURN_SEED` to fix the seed within a reply. All defaults stay at the model's defaults (seed fixing is off), and a benchmark script for comparing tone was added.
+
+**False "microphone stopped" detection**
+On iOS, a system mute or an audio interruption (a phone call, another app's audio, etc.) could trigger the "microphone stopped" recovery and show a failure notice. The microphone sends zero samples during these states, and that was being judged as a dead track. Silence detection is now suspended while the track is muted or the audio context is interrupted/suspended, and recovery is re-enabled once the state returns to normal. The failure notice is also worded less definitively.
+
+**Same sentence-end treatment for Supertonic (server)**
+With Supertonic 3 there was no sentence-end pause or fade, so transitions between sentences felt abrupt. Both engines now share `TTS_TAIL_MS` and `TTS_FADE_MS` (the old `QWEN_TTS_*` names still work), so Supertonic sentences also get a fade at the start and end of speech and a pause of exact length.
+
+## 0.6.5 (2026-11-03) — app v47
+
+**No sound after reconnecting**
+After the connection dropped and reconnected, reply text arrived but no audio played. On reconnect the server's reply numbering restarts at 0, but the client still held the numbers it had marked as "interrupted replies" on the previous connection, so it discarded the new reply's audio. The list of interrupted replies and the playback state are now reset when the server signals it is ready.
+
+**Uneven speaking rate (server)**
+At higher speeds (e.g. 1.3x) speech felt like it sped up and slowed down from one stretch to the next. The time-stretcher (WSOLA) used 20 ms frames, which cut syllables unevenly. After listening comparisons, the frame is now 40 ms (`QWEN_TTS_TSM_FRAME_MS`) and the search range ±15 ms (`QWEN_TTS_TSM_TOL_MS`).
+
+## 0.6.4 (2026-11-03) — app v46
+
+**Microphone-preparing indicator and ready chime**
+In the first conversation, people sometimes started talking before the microphone was ready and lost the beginning (see 0.6.3). Turning on the conversation now shows that the microphone is being prepared, and a ready chime plays only if it took more than 300 ms after the tap. If the microphone is ready right away, no sound is played.
+
+## 0.6.3 (2026-11-03) — app v45
+
+**Beginning of the first sentence missing**
+The start of the first sentence in the first conversation did not show up in the transcript. Acquiring the microphone (including the permission check) takes time in the first conversation, and whatever was said during that time was kept neither on the client nor on the server. The client now sends a pre-buffer collected right after the tap (up to 2 s), and the pre-roll prepended to the start of speech is longer (`VAD_PREROLL_MS` 500 ms; `VAD_FIRST_PREROLL_MS` 1000 ms for the first utterance after a conversation starts).
+
+**Stop repeating silent-track recovery**
+If silent-track recovery fails, it is not retried within the same conversation, so repeated recovery attempts no longer get in the way.
+
+## 0.6.2 (2026-11-03) — app v44
+
+**Earlier detection of silent tracks**
+After a long time in the background, the microphone track could be live yet send only zeros, so nothing was heard. The old detection kicked in only after 8 s, which was too late. Now, if zero samples continue for 2 s after a conversation starts (1 s after returning from the background), the track is re-acquired, and if that does not help, a new audio context is created. The diagnostic line shows the zero-sample ratio (`zeros=`).
+
+**Replies cut off by a wrong ducking baseline (server)**
+In the first conversation, replies often cut themselves off right after they started. Right after the first playback the iOS microphone sends a few seconds of complete silence; the ducking check took that stretch as its baseline level and treated the microphone coming back (echo) as "the user speaking". Silent windows (at or below `MIC_SILENCE_DB`) are now excluded from the baseline, a decision is made only with enough baseline windows (`DUCK_PRE_MIN_WINDOWS`), and the microphone level must exceed the expected echo level by `DUCK_USER_MARGIN_DB` (6 dB) to count as user speech.
+
+**Stronger echo text filter (server)**
+Speaker output (echo) was still occasionally transcribed and created bogus turns. The reply text (e.g. "11월") differs from what was actually spoken (the reading, "십일월"), so it slipped past the text comparison, and in the first conversation the echo delay estimate had not been learned yet. Both the original text and the reading are now compared, and utterances under echo check use fuzzy similarity (`ECHO_FUZZY_RATIO`, 0.75). Echo delay and gain estimates are saved to `aec_state.json` (`AEC_STATE_PATH`) and used from the first conversation of the next run.
+
+## 0.6.1 (2026-11-03) — app v43
+
+**Three-step microphone recovery**
+After returning from the background, the microphone sometimes stopped hearing anything. The audio context reported running while its clock was actually frozen, so audio processing (the worklet) never ran, and the existing recovery did not catch this. The client now checks whether the context clock has stopped and recovers in order: rebuild the audio graph → new microphone track → new audio context (at most twice per conversation). If a user gesture is required, it continues on the next tap. The diagnostic line shows context clock progress (`ct=`).
+
+**Keep one voice within a reply (server)**
+Qwen3-TTS and Supertonic voices were mixed within a single reply. When the server was busy and Qwen's first audio chunk took longer than 2.5 s, that sentence fell back to Supertonic, and this repeated sentence by sentence. Qwen's first chunk is now given extra time equal to the audio already queued for playback (`QWEN_TTS_LEAD_MARGIN_S`, capped at `QWEN_TTS_FIRST_CHUNK_MAX_S`), and once a reply falls back, it stays on Supertonic to the end. The fallback count is shown in `/health`.
+
+**Fewer ducking checks (server)**
+The volume often dipped briefly (about 0.3 s) while a reply was playing. The check that lowers the volume to see whether incoming sound is the user speaking (ducking) ran often, and about 70% of those runs were echo wrongly suspected as speech. When echo correlation is confident that it is echo (`DUCK_SKIP_CORR`, `DUCK_SKIP_LEVEL_DB`), the volume is no longer lowered and the decision is made by correlation after the utterance ends. Ducking still happens if the sound goes on long and non-echo windows accumulate.
+
+**Don't transcribe confirmed echo (server)**
+The tail of an utterance already confirmed as echo by the ducking check could be transcribed, creating bogus turns or cutting off the reply. Utterances confirmed as echo are now discarded without transcription unless the level rises clearly afterwards (`DUCK_ECHO_RISE_DB`, `DUCK_ECHO_RISE_MS`). Suspected echo during playback interrupts the reply only after the transcription verdict; if it turns out to be echo, playback simply continues. Short fragments that contain only numbers/years, or partially match recent reply sentences, are also filtered as echo.
+
+## 0.6.0 (2026-11-03) — app v42
+
+First public release. A local voice server for talking to Hermes Agent on your Mac from an iPhone home-screen web app, with mlx-whisper transcription, Silero VAD and Smart Turn end-of-turn detection, barge-in, server-side conversation history, and launchd/tailscale serve deployment scripts. An English README is included.
+
+**Qwen3-TTS as the default TTS**
+Qwen3-TTS is now the default engine (`TTS_ENGINE=qwen`), with Supertonic kept as the fallback and a lightweight alternative. The server starts even without the Supertonic model, and in that case waits for Qwen instead of falling back. A pre-flight check was added to the install script.
+
+**Native Korean numerals before counting units**
+"4번" was read with Sino-Korean numerals ("사 번"), which sounded unnatural for counts. Numbers 1–99 before counting units are now read with native Korean numerals (네 번, 한 번, 열한 시). Numbers before ordinal or Sino-Korean units are read as before.
+
+**Access token and Origin check**
+CORS does not apply to WebSockets, so any web page on the same device could connect to the server and send commands to Hermes. An optional access token (`VOICE_TOKEN`) and an `Origin` check on `/ws` connections were added, accepting only same-origin and non-browser clients. Add other origins to `VOICE_ALLOWED_ORIGINS` if needed.

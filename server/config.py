@@ -83,8 +83,11 @@ QWEN_TTS_TEMPO = float(os.environ.get("QWEN_TTS_TEMPO", "1.2"))
 QWEN_TTS_TSM_FRAME_MS = float(os.environ.get("QWEN_TTS_TSM_FRAME_MS", "40"))
 QWEN_TTS_TSM_TOL_MS = float(os.environ.get("QWEN_TTS_TSM_TOL_MS", "15"))
 # 문장 끝에 남기는 무음(쉼)과 문장 시작·끝 페이드(ms). 끝 120 ms는 문장 사이가 딱딱해 250으로(2026-11-03 사용자 피드백)
-QWEN_TTS_TAIL_MS = float(os.environ.get("QWEN_TTS_TAIL_MS", "300"))
-QWEN_TTS_FADE_MS = float(os.environ.get("QWEN_TTS_FADE_MS", "20"))
+# 두 엔진 공통: 문장 끝 쉼과 시작·끝 페이드. QWEN_TTS_*는 옛 이름(호환)
+TTS_TAIL_MS = float(os.environ.get("TTS_TAIL_MS", os.environ.get("QWEN_TTS_TAIL_MS", "300")))
+TTS_FADE_MS = float(os.environ.get("TTS_FADE_MS", os.environ.get("QWEN_TTS_FADE_MS", "20")))
+QWEN_TTS_TAIL_MS = TTS_TAIL_MS
+QWEN_TTS_FADE_MS = TTS_FADE_MS
 QWEN_TTS_INSTRUCT = os.environ.get("QWEN_TTS_INSTRUCT", "").strip()
 # 샘플링(빈 값 = mlx-audio 모델 기본 temperature 0.9·top_k 50·top_p 1.0). 낮추면 문장마다 톤 편차가 줄어든다.
 QWEN_TTS_TEMPERATURE = os.environ.get("QWEN_TTS_TEMPERATURE", "").strip()
