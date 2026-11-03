@@ -364,3 +364,89 @@ def test_digital_silence_keeps_learned_lag():
     assert after
     assert all(abs(r.lag_ms - 200) <= 48 for r in after), [r.lag_ms for r in after]
     assert abs(gate.lag_est_ms - 200) <= 60, gate.lag_est_ms
+
+
+# ---------- 학습 상태 사전값(prior)·저장(aec_state.json) ----------
+
+def _burst_ref(ms=300, db=-18.0):
+    """처음 ms 동안만 소리(-18 dBFS 잡음), 뒤는 무음인 2초 참조(44.1 kHz int16)."""
+    n = int(2.0 * 44100)
+    a = np.zeros(n, dtype=np.float32)
+    k = int(ms * 44.1)
+    a[:k] = np.random.default_rng(3).standard_normal(k) * 10 ** (db / 20)
+    return (np.clip(a, -1, 1) * 32767).astype(np.int16)
+
+
+def _first_window(gate, t=0.5, mic_db=-55.0):
+    ref = ReferenceBuffer()
+    ref.add(3, _burst_ref())
+    tl = PlaybackTimeline()
+    tl.report(3, 0.0, 0.0)
+    w = noise_floor(WINDOW, db=mic_db, seed=11)
+    return gate.process(w, t, ref, tl, active=True)
+
+
+def test_prior_first_window_judged():
+    """기본 lag(90 ms)로는 t=0.5 s에 참조 위치가 무음 구간이라 보류. 저장된 lag 200 ms·이득 -30 dB를 사전값으로
+    넣으면 첫 창부터 expected_db를 그 이득으로 계산하고 레벨 규칙으로 판정한다."""
+    r0 = _first_window(EchoGate())
+    assert not r0.judged and r0.rule == "보류" and r0.expected_db != r0.expected_db
+    g = EchoGate()
+    assert g.set_prior(200.0, -30.0)
+    r = _first_window(g)
+    assert r.judged and r.rule != "보류"
+    assert -60.0 < r.expected_db < -44.0              # 참조(-18 dBFS 근방) + 이득 -30
+    g2 = EchoGate()
+    g2.set_prior(200.0, -20.0)
+    assert abs(_first_window(g2).expected_db - (r.expected_db + 10.0)) < 0.5   # 이득 prior가 그대로 반영
+    assert r.echo and r.rule == "레벨"
+    # lag 점수도 prior lag 근처에 심어 둠(첫 상관이 범위 끝 -100 ms로 튀지 않게)
+    k = int(np.argmax(g._lag_score))
+    assert abs(g.lags[k] * 1000 - 200) <= 16
+
+
+def test_prior_not_applied_after_learning_and_clamped():
+    g = EchoGate()
+    g.learned = 5
+    assert not g.set_prior(200.0, -30.0) and g.lag_est_ms != 200.0
+    g = EchoGate()
+    assert g.set_prior(5000.0, 20.0)
+    assert g.lag_est_ms <= 600.0 and g.gain_db <= 0.0
+    assert not EchoGate().set_prior(float("nan"), -20.0)
+
+
+def test_learning_counts_and_confident():
+    ref44 = make_ref(sec=10.0)
+    ref16 = resample_44k_to_16k(ref44)
+    mic = echo_of(ref16) + noise_floor(ref16.size)
+    g = EchoGate()
+    run_gate(mic, ref44, gate=g)
+    assert g.learned > 0
+    st = g.state()
+    assert set(st) == {"lag_ms", "gain_db", "learned"} and st["learned"] == g.learned
+
+
+def test_aec_state_store_roundtrip(tmp_path):
+    from server.aec_gate import AecStateStore
+    now = [0.0]
+    p = tmp_path / "aec_state.json"
+    st = AecStateStore(p, clock=lambda: now[0])
+    assert st.load("k") is None                      # 파일 없음
+    vp = {"screen": [393, 852, 852], "dpr": 3}
+    k1 = AecStateStore.make_key("pwa", vp, True, False)
+    k2 = AecStateStore.make_key("pwa", vp, False, False)
+    assert k1 == "pwa|393x852@3|aec=1|hd=0" and k1 != k2
+    assert AecStateStore.make_key(None, None, True, True) == "?|?|aec=1|hd=1"
+    assert st.save(k1, {"lag_ms": 150.0, "gain_db": -24.5, "learned": 60})
+    assert not st.save(k1, {"lag_ms": 160.0, "gain_db": -25.0, "learned": 90})   # 1분 throttle
+    assert st.save(k2, {"lag_ms": 300.0, "gain_db": -12.0, "learned": 50})      # 다른 키는 따로
+    now[0] = 61.0
+    assert st.save(k1, {"lag_ms": 160.0, "gain_db": -25.0, "learned": 90})
+    st2 = AecStateStore(p)
+    assert st2.load(k1) == {"lag_ms": 160.0, "gain_db": -25.0, "learned": 90}
+    assert st2.load(k2)["lag_ms"] == 300.0
+    assert not (tmp_path / "aec_state.json.tmp").exists()
+    p.write_text("{깨짐", encoding="utf-8")
+    assert AecStateStore(p).load(k1) is None          # 깨진 파일은 무시
+    assert AecStateStore(p).save(k1, {"lag_ms": 1.0, "gain_db": -20.0, "learned": 40})
+    assert AecStateStore(p).load(k1)["lag_ms"] == 1.0

@@ -15,7 +15,7 @@ import numpy as np
 from fastapi import WebSocket
 
 from . import config
-from .aec_gate import EchoGate, PlaybackTimeline, ReferenceBuffer
+from .aec_gate import AecStateStore, EchoGate, PlaybackTimeline, ReferenceBuffer
 from .echo import EchoMemory
 from .hermes import HermesClient, HermesError, new_session_id
 from .history import HistoryStore
@@ -113,6 +113,13 @@ class VoiceSession:
         self.timeline = PlaybackTimeline()  # 클라이언트 pos_ms로 만든 재생 시간축
         self.gate = EchoGate()
         self._aec_on = False              # pos_ms를 보내는 클라이언트일 때만 감지기 사용
+        # 게이트 학습 상태 저장·사전값(aec_state.json, 클라이언트·설정별 키)
+        self.aec_store: Optional[AecStateStore] = (
+            AecStateStore(config.AEC_STATE_PATH) if config.AEC_STATE_PATH.strip().lower() != "off" else None)
+        self._client_kind: Optional[str] = None
+        self._client_vp = None
+        self._aec_key: Optional[str] = None
+        self._aec_saved_learned = 0
         self._gatelog = [0, 0, 0, -1.0, 0.0, 0]  # VOICE_INPUT_LOG: 창 수, 판정 수, 에코 수, 최대 상관, expected 합, 개수
         self._gate_recent: list = []      # 최근 창 판정(hold 로그용: 비에코 근거 집계)
         # hold 덕킹 능동 검사(HOLD_MODE=duck)
@@ -406,6 +413,7 @@ class VoiceSession:
         active = self._aec_on and (self.timeline.active(now) or self._playing())
         win = np.frombuffer(w, dtype="<i2").astype(np.float32) / 32768.0
         r = self.gate.process(win, t, self.aec_ref, self.timeline, active=active)
+        self._maybe_save_aec()
         self._gate_recent.append(r)
         del self._gate_recent[:-16]
         if self._duck_skip is not None and r.judged and not r.echo:
@@ -429,6 +437,48 @@ class VoiceSession:
         if not r.judged:
             return None
         return r.echo
+
+    def _aec_state_key(self) -> str:
+        return AecStateStore.make_key(self._client_kind, self._client_vp, self.aec, self.half_duplex)
+
+    def _apply_aec_prior(self) -> None:
+        """hello·settings 때: 이 클라이언트·설정 키의 저장값을 게이트 사전값으로. 키가 그대로면 아무것도 안 함.
+        키가 바뀌었는데 이미 이번 세션에서 학습한 게 있으면(설정을 대화 중 바꿈) 게이트를 초기화하고 새 키의 값으로."""
+        key = self._aec_state_key()
+        if key == self._aec_key:
+            return
+        self._aec_key = key
+        self._aec_saved_learned = 0
+        if self.gate.learned > 0:
+            self.gate.reset()
+        if self.aec_store is None:
+            return
+        try:
+            st = self.aec_store.load(key)
+        except Exception:  # noqa: BLE001
+            log.exception("aec_state 로드 실패")
+            st = None
+        if st is None:
+            self.gate.reset()
+            log.info("에코 게이트 사전값 없음 (%s)", key)
+            return
+        self.gate.reset()
+        if self.gate.set_prior(st["lag_ms"], st["gain_db"]):
+            log.info("에코 게이트 사전값 %s: lag %.0f ms, 이득 %.1f dB (저장 때 학습 %d창)",
+                     key, self.gate.lag_est_ms, self.gate.gain_db, st.get("learned", 0))
+
+    def _maybe_save_aec(self) -> None:
+        """게이트가 충분히 학습했으면(EchoGate.confident) 키별로 1분에 한 번 이하 저장."""
+        if self.aec_store is None or self._aec_key is None or not self.gate.confident:
+            return
+        if self.gate.learned == self._aec_saved_learned:
+            return
+        try:
+            if self.aec_store.save(self._aec_key, self.gate.state()):
+                self._aec_saved_learned = self.gate.learned
+                log.info("에코 게이트 상태 저장 %s: %s", self._aec_key, self.gate.state())
+        except Exception:  # noqa: BLE001
+            log.exception("aec_state 저장 실패")
 
     def _sure_echo(self) -> bool:
         """덕킹 검사를 생략할 만큼 확실한 에코인가: 최근 DUCK_SKIP_WINDOWS창 중 판정된 창이 절반 이상이고
@@ -770,7 +820,7 @@ class VoiceSession:
     def _echo_filter(self, text: str, echo_check: bool, short_echo: Optional[float] = None
                      ) -> Optional[tuple[str, str]]:
         """받아쓴 문장 텍스트 에코 필터. 에코면 (로그 머리, 근거), 아니면 None.
-        echo_check: 최근 문장 비교(echo.reason). short_echo: 짧은 조각 완화 기준(게이트 에코 비율, None이면 안 씀).
+        echo_check: 최근 문장 비교(echo.reason, 원문·독음) + 퍼지 규칙(echo.fuzzy_reason). short_echo: 짧은 조각 완화 기준(게이트 에코 비율, None이면 안 씀).
         전역 규칙(길고 거의 같은 문장)은 항상."""
         if not text:
             return None
@@ -778,6 +828,10 @@ class VoiceSession:
             reason = self.echo.reason(text)
             if reason:
                 return "에코 무시", reason
+            # 퍼지(받아쓰기 오류 허용): 에코 검사 대상 발화에만. 재생이 없을 때 사용자가 답을 따라 말하는 건 막지 않는다
+            fz = self.echo.fuzzy_reason(text, ratio=config.ECHO_FUZZY_RATIO)
+            if fz is not None:
+                return f"에코 무시(퍼지 {fz:.2f})", f"최근 문장 독음과 유사도 {fz:.2f}"
         if short_echo is not None:
             big = config.SHORT_ECHO_BIGRAM if short_echo >= config.SHORT_ECHO_FRAC else None
             lreason = self.echo.lenient_reason(text, bigram=big)
@@ -858,6 +912,9 @@ class VoiceSession:
         if t == "hello":
             if msg.get("vp") is not None:
                 log.info("client viewport: %s", json.dumps(msg.get("vp"), ensure_ascii=False))
+            self._client_kind = msg.get("client") if isinstance(msg.get("client"), str) else None
+            self._client_vp = msg.get("vp") if isinstance(msg.get("vp"), dict) else None
+            self._apply_aec_prior()
             resume = msg.get("resume")
             resume = resume if isinstance(resume, str) and resume.strip() else None
             # resume이 없으면(iOS가 localStorage를 지운 경우 등) 서버가 기억하는 마지막 세션을 잇는다.
@@ -936,6 +993,8 @@ class VoiceSession:
             if "half_duplex" in msg:
                 self.half_duplex = bool(msg["half_duplex"])
             log.info("settings aec=%s half_duplex=%s", self.aec, self.half_duplex)
+            if self._aec_key is not None:  # hello 뒤에만(키에 클라이언트 정보가 들어감)
+                self._apply_aec_prior()
         elif t == "set_model":
             if msg.get("model") in MODELS:
                 self.model = msg["model"]
@@ -1211,7 +1270,7 @@ class VoiceSession:
                     self._sched[-1] = (st0, total / OUT_RATE)
                 self._play_until = max(self._play_until, self.clock()) + len(pcm) / OUT_RATE
                 if total == len(pcm):
-                    self.echo.add(item, end=self._est_play_end(gen))  # 보관은 추정 재생 종료부터
+                    self.echo.add(item, spoken, end=self._est_play_end(gen))  # 보관은 추정 재생 종료부터
                 for i in range(0, len(pcm), CHUNK_SAMPLES):
                     await self._wait_hold(gen)
                     if gen != self.generation:
@@ -1247,7 +1306,7 @@ class VoiceSession:
             if not self.tts.loaded:
                 await self.send_json({"type": "error", "message": "TTS가 아직 준비되지 않았어요"})
                 continue
-            try:  # 독음 정규화는 합성에만 쓴다(자막 speak_start·heard·에코 메모리는 원문 item)
+            try:  # 독음 정규화는 합성·에코 메모리(독음 비교)에 쓴다(자막 speak_start·heard는 원문 item)
                 spoken = normalize_for_tts(item)
             except Exception:  # noqa: BLE001
                 log.exception("독음 정규화 실패, 원문으로 합성")
@@ -1289,7 +1348,7 @@ class VoiceSession:
                 st0 = max(self._sched[-1][0] + self._sched[-1][1], self.clock()) if self._sched else self.clock()
                 self._sched.append((st0, len(pcm) / OUT_RATE))
                 self._play_until = max(self._play_until, self.clock()) + len(pcm) / OUT_RATE
-                self.echo.add(item, end=self._est_play_end(gen))  # 보관은 추정 재생 종료부터
+                self.echo.add(item, spoken, end=self._est_play_end(gen))  # 보관은 추정 재생 종료부터
                 for i in range(0, len(pcm), CHUNK_SAMPLES):
                     await self._wait_hold(gen)
                     if gen != self.generation:

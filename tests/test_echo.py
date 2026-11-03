@@ -82,3 +82,49 @@ def test_lenient_numeric_fragments():
     assert not lenient_echo_reason("9개", recent[:1] + ["다른 말이에요.", "숫자 없는 문장이에요."])  # 최근 2문장만
     assert lenient_echo_reason("올해 12월 결과가 이후로", recent, bigram=0.5)
     assert not lenient_echo_reason("올해 12월 결과가 이후로", recent, bigram=None)
+
+
+# ---------- 독음 비교·퍼지 규칙(실기 18:33: '쌀쌀한 11월이라'를 '쌀쌀한 십일올이라나'로 받아씀) ----------
+
+def test_read_digits():
+    from server.echo import read_digits
+    assert read_digits("11월이라") == "십일월이라"
+    assert read_digits("2025년 6월 10월") == "이천이십오년 유월 시월"
+    assert read_digits("15도, 100, 10000, 11000") == "십오도, 백, 만, 만천"
+
+
+def _mem():
+    m = EchoMemory(memory_s=60, clock=lambda: 0.0)
+    m.add("오늘은 국물 요리가 좋겠어요.")
+    m.add("쌀쌀한 11월이라 뜨끈한 국물 어떠세요?")
+    return m
+
+
+def test_spoken_form_stored_and_compared():
+    m = _mem()
+    assert m.recent_spoken()[-1] == "쌀쌀한 십일월이라 뜨끈한 국물 어떠세요?"
+    # 독음 그대로 받아쓰면 원문과는 안 맞아도 독음 비교로 에코
+    assert m.reason("쌀쌀한 십일월이라 뜨끈한")
+    # TTS에 넘긴 독음 문장을 직접 넣을 수도 있음(숫자는 한자어 독음으로 마저 바꿈)
+    m2 = EchoMemory(memory_s=60, clock=lambda: 0.0)
+    m2.add("3번 확인했어요.", "세 번 확인했어요.")
+    assert m2.recent_spoken() == ["세 번 확인했어요."]
+    assert m2.reason("세 번 확인했어요")
+    # 받아쓴 쪽 숫자도 독음형으로 비교
+    m3 = EchoMemory(memory_s=60, clock=lambda: 0.0)
+    m3.add("기온은 십오 도 정도예요.")
+    assert m3.reason("기온은 15도 정도")
+
+
+def test_fuzzy_examples():
+    m = _mem()
+    from server.echo import ECHO_FUZZY_RATIO
+    # 받아쓰기 오류('월'->'올')·조사 붙음('이라나'): 기존 규칙은 못 잡고 퍼지가 잡는다
+    assert m.reason("쌀쌀한 십일올이라나") is None
+    assert m.fuzzy_reason("쌀쌀한 십일올이라나") is not None
+    assert m.fuzzy("쌀쌀한 십일올이라나") >= ECHO_FUZZY_RATIO
+    # 사용자 말
+    assert m.fuzzy_reason("순두부찌개 말고 다른 거") is None
+    assert m.fuzzy_reason("쌀쌀하네 오늘") is None
+    # 6자 미만은 퍼지 규칙을 안 씀
+    assert m.fuzzy("쌀쌀한 십일") == 0.0

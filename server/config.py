@@ -26,6 +26,8 @@ VOICE_SESSION_IDLE_HOURS = float(os.environ.get("VOICE_SESSION_IDLE_HOURS", "0")
 VOICE_DATA_DIR = Path(os.environ.get("VOICE_DATA_DIR") or str(Path.home() / ".hermes" / "voice")).expanduser()
 VOICE_DATA_DIR.mkdir(parents=True, exist_ok=True)
 HISTORY_PATH = VOICE_DATA_DIR / "history.json"
+# 에코 대조 게이트 학습 상태(lag·이득, 클라이언트·설정별). 빈 값이면 VOICE_DATA_DIR/aec_state.json, off면 저장·로드 안 함
+AEC_STATE_PATH = os.environ.get("AEC_STATE_PATH") or str(VOICE_DATA_DIR / "aec_state.json")
 
 STT_MODEL = os.environ.get("STT_MODEL", "mlx-community/whisper-large-v3-turbo")
 # Hugging Face 캐시: 기본은 HF 표준 위치(HF_HOME 또는 ~/.cache/huggingface 아래 hub/). 다른 디스크에 두려면 env로.
@@ -86,6 +88,8 @@ TTS_LEXICON_USER = os.environ.setdefault("TTS_LEXICON_USER", str(VOICE_DATA_DIR 
 HOLD_CONFIRM_MS = int(os.environ.get("HOLD_CONFIRM_MS", "900"))   # 잠정 끼어들기 뒤 이만큼 말이 이어지면 확정
 ECHO_TAIL_MS = int(os.environ.get("ECHO_TAIL_MS", "1500"))        # 재생 끝난 뒤 에코 꼬리 가드 시간
 ECHO_MEMORY_S = float(os.environ.get("ECHO_MEMORY_S", "60"))      # 에코 비교용 문장 보관(그 문장 추정 재생 종료부터)
+# 퍼지 에코 규칙(에코 검사 대상 발화에만): 최근 2문장 독음의 부분 문자열과 유사도가 이 이상이면 에코(server/echo.py)
+ECHO_FUZZY_RATIO = float(os.environ.get("ECHO_FUZZY_RATIO", "0.75"))
 # pos_ms 보내는 클라이언트: 마지막 재생 위치 보고가 이 시간 안이어야 "재생 중"
 PLAYBACK_REPORT_TIMEOUT_S = float(os.environ.get("PLAYBACK_REPORT_TIMEOUT_S", "1.5"))
 # 잠정 끼어들기 방식: duck(재생을 낮춰 마이크가 따라 내려가는지 능동 검사, 기본) | pause(재생 일시정지, 예전 동작)

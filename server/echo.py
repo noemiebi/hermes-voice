@@ -5,6 +5,7 @@
 """
 from __future__ import annotations
 
+import os
 import re
 import time
 from collections import deque
@@ -16,11 +17,74 @@ ECHO_BIGRAM = 0.7      # 받아쓴 문장의 문자 bigram 중 최근 문장에 
 MIN_LEN = 2            # 정규화 뒤 이보다 짧으면("네") 에코로 보지 않음
 GLOBAL_MIN_LEN = 12    # 전역 규칙(재생 꼬리와 무관): 정규화 길이가 이 이상이고
 GLOBAL_SIM = 0.85      # 최근 문장과의 유사도(비율 또는 bigram 포함률)가 이 이상이면 에코
+# 퍼지 규칙(에코 검사 대상 발화에만): 받아쓰기 오류('십일월'->'십일올', 조사 붙음)를 견디게 최근 문장 독음의
+# 아무 위치에서 길이 L±FUZZY_SLACK 부분 문자열과의 SequenceMatcher 비율이 이 이상이면 에코
+ECHO_FUZZY_RATIO = float(os.environ.get("ECHO_FUZZY_RATIO", "0.75"))
+FUZZY_MIN_LEN = 6      # 정규화(공백·문장부호 제거) 길이가 이보다 짧으면 퍼지 규칙을 쓰지 않음
+FUZZY_SLACK = 2
 
 
 def normalize(text: str) -> str:
     """공백·문장부호 제거, 소문자."""
     return re.sub(r"[\W_]+", "", text or "").lower()
+
+
+_DIGITS = "영일이삼사오육칠팔구"
+_SMALL = ["", "십", "백", "천"]
+_BIG = ["", "만", "억", "조"]
+
+
+def _sino(n: int) -> str:
+    """정수를 한자어 수사 독음으로(11 -> 십일, 2025 -> 이천이십오, 10000 -> 만)."""
+    if n == 0:
+        return "영"
+    out = []
+    for gi, big in enumerate(_BIG):
+        g = (n // 10 ** (4 * gi)) % 10000
+        if not g:
+            continue
+        part = ""
+        for k in range(3, -1, -1):
+            d = (g // 10 ** k) % 10
+            if d:
+                part += ("" if d == 1 and k > 0 else _DIGITS[d]) + _SMALL[k]
+        if big == "만" and g == 1:
+            part = ""
+        out.append(part + big)
+    return "".join(reversed(out))
+
+
+def read_digits(text: str) -> str:
+    """남은 아라비아 숫자를 한자어 독음으로(TTS가 소리 내는 대로: '11월' -> '십일월', 6월 -> 유월).
+    0으로 시작하거나 16자리 넘는 숫자는 한 자리씩 읽는다."""
+    def rep(m: re.Match) -> str:
+        num, after = m.group(0), text[m.end():m.end() + 1]
+        if num.startswith("0") and len(num) > 1 or len(num) > 16:
+            return "".join("공" if c == "0" else _DIGITS[int(c)] for c in num)
+        n = int(num)
+        if after == "월" and n in (6, 10):
+            return "유" if n == 6 else "시"
+        return _sino(n)
+    return re.sub(r"\d+", rep, text or "")
+
+
+def spoken_form(text: str) -> str:
+    """TTS가 실제로 읽는 독음(normalize_for_tts + 남은 숫자 한자어 독음). 정규화 실패면 숫자 독음만."""
+    try:
+        from .tts_text import normalize_for_tts
+        t = normalize_for_tts(text)
+    except Exception:  # noqa: BLE001
+        t = text or ""
+    return read_digits(t)
+
+
+def _variants(text: str) -> list[str]:
+    """받아쓴 문장의 비교 형태: 원형과 독음형(다르면)."""
+    out = [text]
+    sp = spoken_form(text)
+    if normalize(sp) and normalize(sp) != normalize(text):
+        out.append(sp)
+    return out
 
 
 def _bigrams(s: str) -> list[str]:
@@ -127,41 +191,105 @@ def lenient_echo_reason(text: str, recent: Iterable[str], last_n: int = 2, bigra
     return None
 
 
+def fuzzy_ratio(text: str, recent: Iterable[str], last_n: int = 2, slack: int = FUZZY_SLACK) -> float:
+    """받아쓴 문장(공백 제거 길이 L)과 최근 last_n문장의 아무 위치 길이 L±slack 부분 문자열 사이 최대
+    SequenceMatcher 비율. L < FUZZY_MIN_LEN이면 0."""
+    n = normalize(text)
+    L = len(n)
+    if L < FUZZY_MIN_LEN:
+        return 0.0
+    sents = [s for s in (normalize(x) for x in recent) if s][-last_n:] if last_n > 0 else []
+    best = 0.0
+    sm = SequenceMatcher(None, autojunk=False)
+    sm.set_seq2(n)
+    for s in sents:
+        for ln in range(max(1, L - slack), L + slack + 1):
+            if ln > len(s):
+                ln = len(s)
+            for i in range(0, len(s) - ln + 1):
+                sm.set_seq1(s[i:i + ln])
+                if sm.real_quick_ratio() <= best or sm.quick_ratio() <= best:
+                    continue
+                r = sm.ratio()
+                if r > best:
+                    best = r
+            if ln == len(s):
+                break
+    return best
+
+
 def is_echo(text: str, recent: Iterable[str]) -> bool:
     return echo_reason(text, recent) is not None
 
 
 class EchoMemory:
-    """speak_start로 보낸 문장을 그 문장의 (추정) 재생 종료 시각부터 memory_s초 동안 기억."""
+    """speak_start로 보낸 문장을 그 문장의 (추정) 재생 종료 시각부터 memory_s초 동안 기억.
+
+    문장마다 원문과 독음(TTS가 읽은 소리: normalize_for_tts + 숫자 한자어 독음)을 함께 두고, 모든 비교를
+    원문·독음 둘 다에 대해 한다. 받아쓴 문장도 원형과 독음형(숫자를 독음으로) 둘 다로 비교한다.
+    어느 조합이든 걸리면 에코. 실기(18:33): 답 원문 '11월이라'를 TTS가 '십일월이라'로 읽었고 STT는
+    '십일올이라나'로 받아써 원문 비교로는 못 잡았다."""
 
     def __init__(self, memory_s: float = 20.0, clock=time.monotonic):
         self.memory_s = memory_s
         self.clock = clock
-        self._items: deque[tuple[float, str]] = deque()
+        self._items: deque[tuple[float, str, str]] = deque()
 
-    def add(self, text: str, end: Optional[float] = None) -> None:
-        """end: 이 문장의 추정 재생 종료 시각(clock). 없으면 지금."""
-        self._items.append((self.clock() if end is None else end, text))
+    def add(self, text: str, spoken: Optional[str] = None, end: Optional[float] = None) -> None:
+        """spoken: TTS에 넘긴 독음 문장(없으면 원문으로 만든다). end: 이 문장의 추정 재생 종료 시각(clock).
+        없으면 지금."""
+        sp = read_digits(spoken) if spoken is not None else spoken_form(text)
+        self._items.append((self.clock() if end is None else end, text, sp))
         self._prune()
 
     def _prune(self) -> None:
         cut = self.clock() - self.memory_s
         # 종료 시각이 순서대로가 아닐 수 있으니(시간축 보정) 전체를 걸러 낸다
-        if any(t < cut for t, _ in self._items):
-            self._items = deque((t, x) for t, x in self._items if t >= cut)
+        if any(it[0] < cut for it in self._items):
+            self._items = deque(it for it in self._items if it[0] >= cut)
 
     def recent(self) -> list[str]:
         self._prune()
-        return [t for _, t in self._items]
+        return [it[1] for it in self._items]
+
+    def recent_spoken(self) -> list[str]:
+        self._prune()
+        return [it[2] for it in self._items]
+
+    def _lists(self) -> list[list[str]]:
+        orig, sp = self.recent(), self.recent_spoken()
+        return [orig] if sp == orig else [orig, sp]
+
+    def _any(self, text: str, fn) -> Optional[str]:
+        for v in _variants(text):
+            for i, lst in enumerate(self._lists()):
+                r = fn(v, lst)
+                if r:
+                    return r if i == 0 else f"{r}, 독음"
+        return None
 
     def reason(self, text: str) -> Optional[str]:
-        return echo_reason(text, self.recent())
+        return self._any(text, echo_reason)
 
     def lenient_reason(self, text: str, bigram: Optional[float] = 0.5, last_n: int = 2) -> Optional[str]:
-        return lenient_echo_reason(text, self.recent(), last_n=last_n, bigram=bigram)
+        return self._any(text, lambda v, lst: lenient_echo_reason(v, lst, last_n=last_n, bigram=bigram))
 
     def global_reason(self, text: str) -> Optional[str]:
-        return global_echo_reason(text, self.recent())
+        return self._any(text, global_echo_reason)
+
+    def fuzzy(self, text: str, last_n: int = 2) -> float:
+        """퍼지 비율 최대(받아쓴 문장 원형·독음형 x 최근 last_n문장 원문·독음)."""
+        best = 0.0
+        for v in _variants(text):
+            for lst in self._lists():
+                best = max(best, fuzzy_ratio(v, lst, last_n=last_n))
+        return best
+
+    def fuzzy_reason(self, text: str, ratio: Optional[float] = None, last_n: int = 2) -> Optional[float]:
+        """에코 검사 대상 발화에만 쓰는 퍼지 규칙. 에코면 비율, 아니면 None."""
+        thr = ECHO_FUZZY_RATIO if ratio is None else ratio
+        r = self.fuzzy(text, last_n=last_n)
+        return r if r >= thr else None
 
     def is_echo(self, text: str) -> bool:
         return self.reason(text) is not None

@@ -17,8 +17,12 @@
 """
 from __future__ import annotations
 
+import json
+import logging
 import os
+import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Optional
 
 import numpy as np
@@ -47,6 +51,13 @@ GAIN_DEFAULT_DB = -22.0   # 에코 이득 초기값(실기 -25~-30보다 크게:
 EXPECT_NEAR_MS = 64.0     # 예상 레벨에 쓰는 참조 근방 ±
 REF_MIN_STD_DB = 3.0      # 상관에 쓰는 참조 포락선의 최소 표준편차(dB)
 LAG_EST_ALPHA = 0.1       # 상관으로 확인된 창의 lag로 lag_est를 따라가는 속도
+# 학습 상태 저장(aec_state.json): 상관으로 에코가 확인돼 lag·이득을 갱신한 창이 이만큼 쌓이면 '학습됨'
+PRIOR_MIN_LEARNED = int(os.environ.get("AEC_PRIOR_MIN_LEARNED", "40"))
+PRIOR_SCORE = 0.3         # prior lag에 심어 두는 lag 점수(EMA라 실제 상관이 쌓이면 곧 덮인다)
+PRIOR_GAIN_RANGE = (-60.0, 0.0)
+SAVE_MIN_INTERVAL_S = 60.0
+
+log = logging.getLogger("hermes-voice.aec")
 
 
 def _db(x):
@@ -260,7 +271,45 @@ class EchoGate:
         self._lag_score: Optional[np.ndarray] = None
         self._release_until = -1e9
         self.noise_db: Optional[float] = None  # 마이크 잡음 바닥(빨리 내려가고 천천히 올라감)
+        self.learned = 0                       # lag·이득을 갱신한(상관으로 에코 확인된) 창 수
+        self.prior: Optional[dict] = None      # set_prior로 넣은 사전값
         self.last = GateResult()
+
+    def set_prior(self, lag_ms: float, gain_db: float) -> bool:
+        """저장해 둔 lag·이득을 사전값으로. 학습 전(learned == 0)일 때만 넣는다. 넣었으면 True.
+
+        lag_est·gain_est를 그 값에서 시작하고(이후 학습은 평소처럼 EMA로 갱신), 상관 lag 점수(_lag_score)를
+        prior lag 근처에 약하게(PRIOR_SCORE) 심어 첫 창들의 최대 상관 lag가 범위 끝(-100 ms)으로 튀지 않게 한다.
+        learned는 0에서 시작(신뢰도 낮음): 저장 조건은 이번 세션의 학습 창 수로만 센다."""
+        if self.learned > 0:
+            return False
+        try:
+            lag, gain = float(lag_ms), float(gain_db)
+        except (TypeError, ValueError):
+            return False
+        if not (np.isfinite(lag) and np.isfinite(gain)):
+            return False
+        lo, hi = float(self.lags[0] * 1000.0), float(self.lags[-1] * 1000.0)
+        lag = min(max(lag, lo), hi)
+        gain = min(max(gain, PRIOR_GAIN_RANGE[0]), PRIOR_GAIN_RANGE[1])
+        self.lag_est_ms, self.gain_db = lag, gain
+        score = np.zeros(len(self.lags))
+        k = int(np.argmin(np.abs(self.lags * 1000.0 - lag)))
+        score[k] = PRIOR_SCORE
+        for j in (k - 1, k + 1):
+            if 0 <= j < len(score):
+                score[j] = PRIOR_SCORE / 2
+        self._lag_score = score
+        self.prior = {"lag_ms": lag, "gain_db": gain}
+        return True
+
+    @property
+    def confident(self) -> bool:
+        return self.learned >= PRIOR_MIN_LEARNED
+
+    def state(self) -> dict:
+        return {"lag_ms": round(float(self.lag_est_ms), 1), "gain_db": round(float(self.gain_db), 2),
+                "learned": int(self.learned)}
 
     def _level(self, t: float, mic_db: float, ref: ReferenceBuffer, timeline: PlaybackTimeline, res: GateResult):
         """예측 레벨 규칙. 반환: None(참조 무음, 보류) | (에코?, 초과?)."""
@@ -338,6 +387,7 @@ class EchoGate:
         # lag·이득 학습: 상관으로 에코가 확인된 창에서만
         if corr_echo and not released and res.lag_ms is not None:
             self.lag_est_ms += LAG_EST_ALPHA * (res.lag_ms - self.lag_est_ms)
+            self.learned += 1
             ref_now = getattr(self, "_ref_now", None)
             if ref_now is not None and ref_now > REF_SILENT_DB and mic_db > DB_FLOOR + 3:
                 self.gain_db += GAIN_ALPHA * ((mic_db - ref_now) - self.gain_db)
@@ -396,3 +446,71 @@ class EchoGate:
         if res.corr >= self.corr_thr:
             return "상관", True
         return "상관낮음", False
+
+
+class AecStateStore:
+    """에코 대조 게이트 학습 상태(lag·이득)를 클라이언트·설정별로 저장(VOICE_DATA_DIR/aec_state.json).
+
+    형식: {"version": 1, "keys": {key: {"lag_ms", "gain_db", "learned", "updated"}}}. 임시 파일 뒤
+    os.replace로 원자적 저장, 키마다 SAVE_MIN_INTERVAL_S에 한 번 이하. 파일이 없거나 깨졌으면 무시(빈 상태)."""
+
+    def __init__(self, path, min_interval_s: float = SAVE_MIN_INTERVAL_S, clock=time.monotonic):
+        self.path = Path(path)
+        self.min_interval_s = min_interval_s
+        self.clock = clock
+        self._last_save: dict[str, float] = {}
+
+    @staticmethod
+    def make_key(client, vp, aec: bool, half_duplex: bool) -> str:
+        """클라이언트 종류 + 화면 해상도(screen w x h @dpr) + 설정(aec, 반이중)."""
+        c = client if isinstance(client, str) and client else "?"
+        res = "?"
+        if isinstance(vp, dict):
+            sc, dpr = vp.get("screen"), vp.get("dpr")
+            if isinstance(sc, list) and len(sc) >= 2 and all(isinstance(x, (int, float)) for x in sc[:2]):
+                res = f"{int(sc[0])}x{int(sc[1])}"
+                if isinstance(dpr, (int, float)) and not isinstance(dpr, bool):
+                    res += f"@{float(dpr):g}"
+        return f"{c[:20]}|{res}|aec={int(bool(aec))}|hd={int(bool(half_duplex))}"
+
+    def _read(self) -> dict:
+        try:
+            data = json.loads(self.path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return {}
+        except Exception as e:  # noqa: BLE001
+            log.warning("aec_state 읽기 실패, 무시: %s", e)
+            return {}
+        keys = data.get("keys") if isinstance(data, dict) else None
+        return keys if isinstance(keys, dict) else {}
+
+    def load(self, key: str) -> Optional[dict]:
+        v = self._read().get(key)
+        if not isinstance(v, dict):
+            return None
+        try:
+            lag, gain = float(v["lag_ms"]), float(v["gain_db"])
+        except (KeyError, TypeError, ValueError):
+            return None
+        if not (np.isfinite(lag) and np.isfinite(gain)):
+            return None
+        return {"lag_ms": lag, "gain_db": gain, "learned": int(v.get("learned") or 0)}
+
+    def save(self, key: str, state: dict, force: bool = False) -> bool:
+        """throttle(키마다 min_interval_s)을 지키며 저장. 저장했으면 True."""
+        now = self.clock()
+        last = self._last_save.get(key)
+        if not force and last is not None and now - last < self.min_interval_s:
+            return False
+        self._last_save[key] = now
+        keys = self._read()
+        keys[key] = {**state, "updated": int(time.time())}
+        tmp = self.path.with_name(self.path.name + ".tmp")
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            tmp.write_text(json.dumps({"version": 1, "keys": keys}, ensure_ascii=False, indent=1), encoding="utf-8")
+            os.replace(tmp, self.path)
+        except Exception as e:  # noqa: BLE001
+            log.warning("aec_state 저장 실패: %s", e)
+            return False
+        return True

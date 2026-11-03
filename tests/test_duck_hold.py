@@ -658,3 +658,85 @@ def test_duck_post_silent_after_extension_resumes():
         assert ws.of("resume") and not ws.of("interrupt") and s._echo_check and not s.holding
         s.speaker_task.cancel()
     asyncio.run(go())
+
+
+# ---------- 독음·퍼지 에코 규칙(실기 18:33)·게이트 사전값 ----------
+
+def test_hold_fuzzy_echo_resumes():
+    """hold 중 끝난 발화를 받아썼더니 답의 독음을 잘못 받아쓴 것('11월이라' -> '십일올이라나'): 퍼지 규칙으로 에코."""
+    async def go():
+        s, ws, stt, hermes, gen = await setup_duck()
+        s.echo.add("쌀쌀한 11월이라 뜨끈한 국물 어떠세요?", "쌀쌀한 11월이라 뜨끈한 국물 어떠세요?")
+        await hold_now(s)
+        await feed(s, -44, 192, seed=70)
+        stt.text = "쌀쌀한 십일올이라나"
+        s.endpointer.in_speech = False
+        await s._on_vad(VADEvent("end", pcm=b"\0\0" * 16000, speech_ms=1536))
+        await settle()
+        assert stt.calls == 1
+        assert ws.of("resume") == [{"type": "resume", "generation": gen}] and not ws.of("interrupt")
+        s.speaker_task.cancel()
+    asyncio.run(go())
+
+
+def test_fuzzy_not_applied_without_playback():
+    """재생이 전혀 없을 때의 일반 발화는 퍼지 규칙을 쓰지 않는다(사용자가 답을 따라 말해도 통과)."""
+    async def go():
+        ws, stt, hermes = FakeWS(), FakeSTT(), FakeHermes()
+        s = VoiceSession(ws, stt, FakeTTS(), hermes)
+        s.clock = Clock()
+        s.endpointer = FakeEP()
+        s.speaker_task = asyncio.create_task(s._speaker())
+        await s._on_text(json.dumps({"type": "hello", "resume": None}))
+        await s._on_text(json.dumps({"type": "conversation", "on": True}))
+        s.echo.add("쌀쌀한 11월이라 뜨끈한 국물 어떠세요?", end=s.clock())
+        s.clock.t += 10.0                               # 꼬리 가드도 지남
+        assert s._echo_filter("쌀쌀한 십일올이라나", False) is None
+        assert s._echo_filter("쌀쌀한 십일올이라나", True)[0].startswith("에코 무시(퍼지")
+        s.endpointer.in_speech = True
+        await s._on_vad(VADEvent("start"))
+        stt.text = "쌀쌀한 십일올이라나"
+        s.endpointer.in_speech = False
+        await s._on_vad(VADEvent("end", pcm=b"\0\0" * 16000, speech_ms=900))
+        await settle()
+        assert ws.of("transcript") and ws.of("transcript")[-1]["text"] == "쌀쌀한 십일올이라나"
+        s.speaker_task.cancel()
+    asyncio.run(go())
+
+
+def test_aec_prior_loaded_on_hello_and_saved(tmp_path):
+    from server.aec_gate import AecStateStore, PRIOR_MIN_LEARNED
+    async def go():
+        store = AecStateStore(tmp_path / "aec_state.json")
+        vp = {"screen": [393, 852, 852], "dpr": 3}
+        store.save(AecStateStore.make_key("pwa", vp, True, False), {"lag_ms": 180.0, "gain_db": -26.0, "learned": 80})
+        store.save(AecStateStore.make_key("pwa", vp, False, False), {"lag_ms": 120.0, "gain_db": -15.0, "learned": 80})
+        ws, stt, hermes = FakeWS(), FakeSTT(), FakeHermes()
+        s = VoiceSession(ws, stt, FakeTTS(), hermes)
+        s.aec_store = AecStateStore(tmp_path / "aec_state.json", clock=lambda: s.clock())
+        s.clock = Clock()
+        await s._on_text(json.dumps({"type": "hello", "resume": None, "client": "pwa", "vp": vp}))
+        assert s.gate.lag_est_ms == 180.0 and s.gate.gain_db == -26.0 and s.gate.learned == 0
+        await s._on_text(json.dumps({"type": "settings", "aec": True, "half_duplex": False}))   # 같은 키: 그대로
+        assert s.gate.lag_est_ms == 180.0
+        await s._on_text(json.dumps({"type": "settings", "aec": False, "half_duplex": False}))  # AEC 끔: 다른 키
+        assert s.gate.lag_est_ms == 120.0 and s.gate.gain_db == -15.0
+        await s._on_text(json.dumps({"type": "settings", "aec": False, "half_duplex": True}))   # 저장값 없음: 기본값
+        assert s.gate.prior is None and s.gate.lag_est_ms != 120.0
+        # 학습이 충분해지면 저장(1분에 한 번 이하)
+        s.gate.lag_est_ms, s.gate.gain_db = 150.0, -20.0
+        s.gate.learned = PRIOR_MIN_LEARNED - 1
+        s._maybe_save_aec()
+        key = AecStateStore.make_key("pwa", vp, False, True)
+        assert s.aec_store.load(key) is None
+        s.gate.learned = PRIOR_MIN_LEARNED
+        s._maybe_save_aec()
+        assert s.aec_store.load(key)["lag_ms"] == 150.0
+        s.gate.lag_est_ms, s.gate.learned = 160.0, PRIOR_MIN_LEARNED + 5
+        s.clock.t += 30.0
+        s._maybe_save_aec()
+        assert s.aec_store.load(key)["lag_ms"] == 150.0      # throttle
+        s.clock.t += 31.0
+        s._maybe_save_aec()
+        assert s.aec_store.load(key)["lag_ms"] == 160.0
+    asyncio.run(go())
