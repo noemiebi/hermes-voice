@@ -30,7 +30,7 @@ log = logging.getLogger("session")
 
 MODELS = ("voice-fast", "voice-deep")
 MODEL_DISPLAY = config.MODEL_LABELS  # 환경변수 MODEL_LABEL_FAST/DEEP(비우면 노트 생략)
-FILLERS = ("잠깐 확인해 볼게요.", "잠시만요, 찾아볼게요.", "확인해 볼게요, 잠깐만요.")  # 첫 채움 말
+FILLERS = ("잠깐 확인해 볼게요.", "잠시만요, 찾아볼게요.", "확인해 볼게요, 잠깐만요.")  # 첫 채움 말(존댓말)
 # 도구 문맥 채움 말(키는 web/app.js TOOL_KO와 같음, `mcp__<서버>__<도구>`는 서버 이름으로). 뒤에 FILLER_TOOL_TAIL을 붙인다
 FILLER_BY_TOOL = {
     "web_search": "웹에서 찾아보는 중이에요", "web_extract": "웹에서 찾아보는 중이에요",
@@ -44,7 +44,65 @@ FILLER_BY_TOOL = {
 FILLER_TOOL_TAIL = ", 조금만요."
 # 일반 채움 말(도구 모름·같은 문구 두 번째부터). 한 턴 안에서 순서대로 소진(반복 없음)
 FILLER_GENERIC = ("아직 찾는 중이에요, 조금만요.", "시간이 좀 걸리네요, 잠시만요.", "거의 다 됐어요.", "조금만 더 기다려 주세요.")
-FILLER_TEXTS = frozenset(FILLERS) | frozenset(v + FILLER_TOOL_TAIL for v in FILLER_BY_TOOL.values()) | frozenset(FILLER_GENERIC)
+# 반말 세트(존댓말 세트와 1:1 대응). 에이전트 답이 반말이면 이쪽을 쓴다(FILLER_STYLE, filler_style_of)
+FILLERS_CASUAL = ("잠깐 확인해 볼게.", "잠시만, 찾아볼게.", "확인해 볼게, 잠깐만.")
+FILLER_BY_TOOL_CASUAL = {
+    "web_search": "웹에서 찾아보는 중이야", "web_extract": "웹에서 찾아보는 중이야",
+    "gmail_readonly": "메일 보고 있어", "naver_mail": "메일 보고 있어",
+    "apple_calendar": "일정 확인하고 있어", "korea_workday": "일정 확인하고 있어",
+    "apple_reminders": "미리 알림 보고 있어", "apple_notes": "메모 찾아보고 있어",
+    "memory": "지난 이야기 떠올리는 중이야", "session_search": "지난 이야기 떠올리는 중이야",
+    "terminal": "맥에서 돌려 보는 중이야", "process_manage": "맥에서 돌려 보는 중이야",
+    "weather": "날씨 확인하고 있어",
+}
+FILLER_TOOL_TAIL_CASUAL = ", 조금만."
+FILLER_GENERIC_CASUAL = ("아직 찾는 중이야, 조금만.", "시간이 좀 걸리네, 잠시만.", "거의 다 됐어.", "조금만 더 기다려 줘.")
+# 문체별 세트: (첫 마디, 도구 문구, 도구 꼬리, 일반 문구)
+FILLER_SETS = {
+    "formal": (FILLERS, FILLER_BY_TOOL, FILLER_TOOL_TAIL, FILLER_GENERIC),
+    "casual": (FILLERS_CASUAL, FILLER_BY_TOOL_CASUAL, FILLER_TOOL_TAIL_CASUAL, FILLER_GENERIC_CASUAL),
+}
+FILLER_TEXTS = frozenset(
+    t for first, by_tool, tail, generic in FILLER_SETS.values()
+    for t in (*first, *(v + tail for v in by_tool.values()), *generic))
+FILLER_STYLE_SENTENCES = 6  # auto 판정에 보는 최근 답 문장 수
+# 문장 끝(문장부호 제거 뒤) 판정. 존댓말을 먼저 본다(예: "니다"는 "다"보다, "니까"는 "까"보다 먼저)
+_FORMAL_ENDS = ("요", "죠", "니다", "니까", "십시오", "시오")
+_CASUAL_ENDS = ("어", "아", "야", "지", "다", "래", "네", "군", "까", "게", "자", "냐",
+                "라", "해", "돼", "줘", "봐", "와", "워", "거든", "걸")
+_SENT_SPLIT_RE = re.compile(r"(?<=[.!?。！？…~])\s+|\n+")
+_END_STRIP_RE = re.compile(r"[^0-9A-Za-z가-힣]+$")
+
+
+def _sentence_style(sentence: str) -> Optional[str]:
+    """문장 하나의 끝으로 'formal'/'casual'/None(판정 불가)."""
+    t = _END_STRIP_RE.sub("", sentence.strip())
+    if not t or not re.search(r"[가-힣]$", t):
+        return None
+    if t.endswith(_FORMAL_ENDS) or t in ("네", "예"):  # 대답 "네."는 존댓말
+        return "formal"
+    if t.endswith(_CASUAL_ENDS):
+        return "casual"
+    return None
+
+
+def filler_style_of(texts, limit: int = FILLER_STYLE_SENTENCES) -> tuple[str, int]:
+    """최근 답 글들(오래된 것 -> 최근 순)의 마지막 limit문장으로 문체를 판정. (문체, 근거 문장 수).
+    판정 가능한 문장 중 많은 쪽, 같거나 근거가 없으면 formal."""
+    sents: list[str] = []
+    for text in texts:
+        if isinstance(text, str):
+            sents.extend(x for x in _SENT_SPLIT_RE.split(text) if x.strip())
+    formal = casual = 0
+    for x in sents[-limit:] if limit > 0 else []:
+        st = _sentence_style(x)
+        if st == "formal":
+            formal += 1
+        elif st == "casual":
+            casual += 1
+    return ("casual" if casual > formal else "formal"), formal + casual
+
+
 _TOOL_HIDDEN = frozenset(("tool_describe", "tool_search", "tool_call"))  # 헤르메스 내부 도구(문맥 없음, web/app.js와 같음)
 _MCP_RE = re.compile(r"^mcp__([^_]+(?:_[^_]+)*?)__(.+)$")
 
@@ -57,14 +115,15 @@ def _is_filler(item) -> bool:
     return isinstance(item, _Filler)
 
 
-def filler_for_tool(name: str) -> Optional[str]:
-    """도구 이름에 맞는 채움 말(꼬리 포함). 모르는 도구·내부 도구면 None."""
+def filler_for_tool(name: str, style: str = "formal") -> Optional[str]:
+    """도구 이름에 맞는 채움 말(꼬리 포함, style 문체). 모르는 도구·내부 도구면 None."""
     if not name or name in _TOOL_HIDDEN:
         return None
     m = _MCP_RE.match(name)
     key = m.group(1) if m else name
-    phrase = FILLER_BY_TOOL.get(key)
-    return phrase + FILLER_TOOL_TAIL if phrase else None
+    _, by_tool, tail, _ = FILLER_SETS.get(style, FILLER_SETS["formal"])
+    phrase = by_tool.get(key)
+    return phrase + tail if phrase else None
 
 
 CHUNK_SAMPLES = OUT_RATE // 2          # 약 0.5초씩 전송
@@ -105,6 +164,7 @@ class VoiceSession:
         self.audio = bytearray()
         self.turn_task: Optional[asyncio.Task] = None
         self._filler_task: Optional[asyncio.Task] = None  # 긴 대기 채움 말 스케줄러(_think)
+        self._replies: dict = {"sid": None, "texts": []}  # 이 세션에서 끝까지 받은 최근 답 원문(채움 말 문체 판정)
         self.queue: asyncio.Queue = asyncio.Queue()
         self.speaker_task: Optional[asyncio.Task] = None
         self._send_lock = asyncio.Lock()
@@ -1067,6 +1127,35 @@ class VoiceSession:
         if task and not task.done() and task is not asyncio.current_task():
             task.cancel()
 
+    def _recent_replies(self) -> list[str]:
+        """채움 말 문체 판정 근거: 현재 세션의 최근 답 원문(오래된 것 -> 최근).
+        ① 서버가 받은 헤르메스 답 전문(result.text) ② 없으면(서버 재시작 뒤 이어 쓰기 등) HistoryStore의 bot 항목."""
+        m = self._replies
+        if m["sid"] and m["sid"] == self.session_id and m["texts"]:
+            return list(m["texts"])
+        if self.store and self.session_id:
+            bots = [it["t"] for it in self.store.items(self.session_id) if it.get("r") == "bot"]
+            return bots[-FILLER_STYLE_SENTENCES:]
+        return []
+
+    def _remember_reply(self, text: str) -> None:
+        if not text or not text.strip() or not self.session_id:
+            return
+        m = self._replies
+        if m["sid"] != self.session_id:
+            m["sid"], m["texts"] = self.session_id, []
+        m["texts"].append(text)
+        del m["texts"][:-FILLER_STYLE_SENTENCES]  # 답 하나가 최소 한 문장이라 이만큼이면 충분
+
+    def _filler_style(self) -> str:
+        """이번 턴 채움 말 문체(config.FILLER_STYLE: formal|casual|auto). auto는 매 턴 최근 답 문장 끝으로 다시 판정."""
+        want = config.FILLER_STYLE
+        if want in ("formal", "casual"):
+            return want
+        style, n = filler_style_of(self._recent_replies())
+        log.info("채움 말 문체: %s (근거 %d문장)", style, n)
+        return style
+
     def _filler_busy(self, gen: int) -> bool:
         """앞서 넣은 말이 아직 큐에 있거나 합성·재생 중인지(그러면 다음 채움 말을 미룬다)."""
         return (not self.queue.empty()) or self._speaking_now or self._play_lead_s(gen) > 0.3
@@ -1207,6 +1296,8 @@ class VoiceSession:
         spoke = {"any": False}
         first = {"tok": None}
         fill = {"tool": None, "used": set(), "generic": 0, "n": 0, "wake": asyncio.Event()}
+        fstyle = self._filler_style() if config.FILLER_ENABLED else "formal"
+        f_first, _, _, f_generic = FILLER_SETS[fstyle]
 
         def enqueue(sentence: str) -> None:
             spoke["any"] = True
@@ -1232,7 +1323,7 @@ class VoiceSession:
                 msg["toolCallId"] = call_id  # 클라이언트가 같은 도구의 여러 호출을 짝지어 칩 하나로 합치는 데 씀
             await self.send_json(msg)
             if state == "started" and first["tok"] is None:
-                tf = filler_for_tool(name)
+                tf = filler_for_tool(name, fstyle)
                 if tf:
                     fill["tool"] = tf
                 fill["wake"].set()
@@ -1247,9 +1338,9 @@ class VoiceSession:
             if tf and tf not in fill["used"]:
                 fill["used"].add(tf)
                 return tf
-            if fill["generic"] < len(FILLER_GENERIC):
+            if fill["generic"] < len(f_generic):
                 fill["generic"] += 1
-                return FILLER_GENERIC[fill["generic"] - 1]
+                return f_generic[fill["generic"] - 1]
             return None
 
         def live() -> bool:
@@ -1263,7 +1354,7 @@ class VoiceSession:
                 pass
             if not live() or spoke["any"] or config.FILLER_MAX < 1:
                 return
-            say_filler(random.choice(FILLERS))
+            say_filler(random.choice(f_first))
             while fill["n"] < config.FILLER_MAX:
                 await asyncio.sleep(config.FILLER_EVERY_S)
                 if not live():
@@ -1300,6 +1391,7 @@ class VoiceSession:
             await self.send_ready()
         if self.session_id:
             _LAST_TURN[self.session_id] = time.time()
+        self._remember_reply(result.text)
         self._answer["done"] = True
         await self.send_json({"type": "assistant_done", "text": result.text})
         self.queue.put_nowait((gen, _END))

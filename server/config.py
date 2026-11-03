@@ -107,6 +107,10 @@ FILLER_ENABLED = os.environ.get("FILLER_ENABLED", "1").strip().lower() not in ("
 FILLER_FIRST_S = float(os.environ.get("FILLER_FIRST_S", "4.0"))
 FILLER_EVERY_S = float(os.environ.get("FILLER_EVERY_S", "8.0"))
 FILLER_MAX = int(os.environ.get("FILLER_MAX", "4"))
+# 채움 말 문체: formal(존댓말) | casual(반말) | auto(매 턴 이 세션 최근 답의 문장 끝으로 판정, 근거 없으면 formal)
+FILLER_STYLE = os.environ.get("FILLER_STYLE", "auto").strip().lower()
+if FILLER_STYLE not in ("formal", "casual", "auto"):
+    FILLER_STYLE = "auto"
 
 # 스피커 에코 대책 (docs/프로토콜.md '에코 대책')
 HOLD_CONFIRM_MS = int(os.environ.get("HOLD_CONFIRM_MS", "900"))   # 잠정 끼어들기 뒤 이만큼 말이 이어지면 확정

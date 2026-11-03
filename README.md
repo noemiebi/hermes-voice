@@ -143,6 +143,7 @@ curl -s http://127.0.0.1:8480/health
 | `FILLER_FIRST_S` | `4.0` | 첫 토큰 전 첫 채움 말까지 초(도구 시작 이벤트가 오면 즉시) |
 | `FILLER_EVERY_S` | `8.0` | 그 뒤 첫 토큰까지 채움 말 간격(초). 앞 채움 말이 아직 재생 중이면 그 간격은 건너뜀 |
 | `FILLER_MAX` | `4` | 한 턴의 채움 말 최대 개수 |
+| `FILLER_STYLE` | `auto` | 채움 말 문체. `formal`(존댓말) · `casual`(반말) · `auto`(매 턴 이 세션 최근 답의 문장 끝을 보고 맞춤, 근거 없으면 존댓말) |
 | `VOICE_DATA_DIR` | `~/.hermes/voice` | 서버 데이터 폴더(없으면 만듦). 대화 기록·마지막 세션 `history.json`, 사용자 독음 사전, STT 교정표 |
 | `PORT` / `HOST` | `8480` / `127.0.0.1` | 바인드. 외부 노출은 리버스 프록시(tailscale serve 등)로 |
 

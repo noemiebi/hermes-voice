@@ -143,6 +143,7 @@ Path variables fall back to their defaults when left empty.
 | `FILLER_FIRST_S` | `4.0` | Seconds before the first filler while no token has arrived (immediately on a tool-start event) |
 | `FILLER_EVERY_S` | `8.0` | Interval between further fillers until the first token. Skipped while the previous filler is still playing |
 | `FILLER_MAX` | `4` | Maximum fillers per turn |
+| `FILLER_STYLE` | `auto` | Filler speech level. `formal` (polite) · `casual` (banmal) · `auto` (each turn, follow the sentence endings of this session's recent answers; polite when there is nothing to go on) |
 | `VOICE_DATA_DIR` | `~/.hermes/voice` | Server data folder (created if missing). Holds conversation history and the last session (`history.json`), the user pronunciation lexicon, and the STT correction table |
 | `PORT` / `HOST` | `8480` / `127.0.0.1` | Bind address. Expose externally through a reverse proxy (tailscale serve, etc.) |
 

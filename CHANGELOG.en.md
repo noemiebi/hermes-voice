@@ -12,6 +12,9 @@ When the duck test (which checks whether sound picked up by the mic during playb
 **Fillers during long waits (server)**
 When a search or tool call ran long, you waited 10 to almost 30 seconds in silence for the first answer (measured first tokens: 8.9, 18.9, 27.6 s). The only filler was a single line on tool start ("잠깐 확인해 볼게요."). Now, before the first token, the first filler plays immediately on a tool-start event or after 4 seconds (`FILLER_FIRST_S`) without one, then one more every 8 seconds (`FILLER_EVERY_S`) until the answer arrives, up to 4 per turn (`FILLER_MAX`). Lines follow the tool in use ("웹에서 찾아보는 중이에요, 조금만요." — searching the web; "메일을 보고 있어요, 조금만요." — reading mail, etc.), otherwise generic lines ("아직 찾는 중이에요, 조금만요." → "시간이 좀 걸리네요, 잠시만요." …) without repeats. When the answer arrives, fillers not yet spoken are skipped, and fillers are left out of the cut-answer note (what the user heard). `FILLER_ENABLED=0` turns them all off.
 
+**Fillers follow the agent's speech level (server)**
+When the Hermes persona answered in casual Korean (banmal), the fillers alone stayed polite ("잠깐 확인해 볼게요."), which sounded off. There was only one, polite, set of filler lines and the app has no polite/casual setting. Now a casual set ("잠깐 확인해 볼게.", "웹에서 찾아보는 중이야, 조금만.", "거의 다 됐어." etc.) mirrors the polite set one-to-one, chosen by `FILLER_STYLE` (default `auto`). `auto` counts, at the start of each turn, the sentence endings of the last 6 sentences the agent said in this session (`요`, `니다`… vs `어`, `야`, `지`…) and uses the majority; ties or no evidence fall back to polite. `formal` or `casual` pins it.
+
 ## 0.6.6 (2026-11-03) — app v48
 
 **Default voice engine is now Supertonic 3 (server)**

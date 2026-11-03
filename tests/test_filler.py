@@ -10,7 +10,9 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from server import config  # noqa: E402
 from server.hermes import TurnResult  # noqa: E402
-from server.session import FILLER_GENERIC, FILLER_TEXTS, FILLERS, VoiceSession, filler_for_tool  # noqa: E402
+from server.history import HistoryStore  # noqa: E402
+from server.session import (FILLER_GENERIC, FILLER_GENERIC_CASUAL, FILLER_TEXTS, FILLERS, FILLERS_CASUAL,  # noqa: E402
+                            VoiceSession, filler_for_tool, filler_style_of)
 from tests.test_session_hold import FakeEP, FakeSTT, FakeWS  # noqa: E402
 
 ANSWER = "오늘 서울은 맑아요."
@@ -55,6 +57,7 @@ def fast(monkeypatch):
     monkeypatch.setattr(config, "FILLER_FIRST_S", 0.2)
     monkeypatch.setattr(config, "FILLER_EVERY_S", 0.3)
     monkeypatch.setattr(config, "FILLER_MAX", 4)
+    monkeypatch.setattr(config, "FILLER_STYLE", "auto")
 
 
 async def ask(hermes, tts=None, wait=1.2):
@@ -183,3 +186,94 @@ def test_interrupt_cancels_scheduler(fast):
     s, ws, n = run(main())
     assert n == 1 and len(ws.of("speak_start")) == 1
     assert s._filler_task is None
+
+
+# ---------- 채움 말 문체(FILLER_STYLE) ----------
+def test_style_judge_formal_casual_mixed_empty():
+    assert filler_style_of(["오늘 서울은 맑아요.", "우산은 필요 없습니다.", "내일 다시 볼게요!", "괜찮으시죠?"]) == ("formal", 4)
+    assert filler_style_of(["오늘 서울은 맑아. 우산은 필요 없어.", "내일 다시 볼게! 괜찮지?", "그건 좋은 생각이다.",
+                            "뭐 먹을까?"]) == ("casual", 6)
+    assert filler_style_of(["좋아요. 그래."])[0] == "formal"          # 같으면 formal
+    assert filler_style_of([]) == ("formal", 0)
+    assert filler_style_of(["", "OK", "🙂"]) == ("formal", 0)        # 근거 없음
+    # 니다·니까는 다·까보다 먼저(formal), 최근 6문장만 본다
+    assert filler_style_of(["확인했습니다. 그럴까요? 맞습니까?"]) == ("formal", 3)
+    old_casual = "그래. " * 10
+    assert filler_style_of([old_casual, "네, 알겠어요. " * 6])[0] == "formal"
+
+
+def test_tool_phrase_casual():
+    assert filler_for_tool("web_search", "casual") == "웹에서 찾아보는 중이야, 조금만."
+    assert filler_for_tool("mcp__naver_mail__list", "casual") == "메일 보고 있어, 조금만."
+    assert filler_for_tool("weird", "casual") is None
+    assert "거의 다 됐어." in FILLER_TEXTS and "잠깐 확인해 볼게." in FILLER_TEXTS
+    assert len(FILLERS_CASUAL) == len(FILLERS) and len(FILLER_GENERIC_CASUAL) == len(FILLER_GENERIC)
+
+
+async def _ask_after(store, sid, hermes, wait=1.2):
+    ws, tts = FakeWS(), ShortTTS()
+    s = VoiceSession(ws, FakeSTT(), tts, hermes, store=store)
+    s.endpointer = FakeEP()
+    s.style_note = ""
+    s.speaker_task = asyncio.create_task(s._speaker())
+    await s._on_text(json.dumps({"type": "hello", "resume": sid}))
+    await s._on_text(json.dumps({"type": "text", "text": "서울 날씨 어때?"}))
+    await asyncio.sleep(wait)
+    s.speaker_task.cancel()
+    return s, ws
+
+
+def _casual_store(tmp_path):
+    store = HistoryStore(tmp_path / "history.json")
+    store.append("sid-1", {"r": "user", "t": "안녕"})
+    store.append("sid-1", {"r": "bot", "t": "안녕! 오늘 뭐 할까? 날씨 좋더라."})
+    store.set_last("sid-1")
+    return store
+
+
+def test_casual_history_gives_casual_fillers(fast, tmp_path, caplog):
+    import logging
+    caplog.set_level(logging.INFO, logger="session")
+    h = SlowHermes(first_delay=0.95, tools=[(0.05, "web_search")])
+    s, ws = run(_ask_after(_casual_store(tmp_path), "sid-1", h))
+    fills = [t for t in spoken(ws) if t != ANSWER]
+    assert fills[0] in FILLERS_CASUAL
+    assert fills[1] == "웹에서 찾아보는 중이야, 조금만."
+    assert fills[2] == FILLER_GENERIC_CASUAL[0]
+    assert "채움 말 문체: casual (근거 2문장)" in caplog.text
+
+
+def test_casual_previous_answer_in_session_memory(fast):
+    # 기록 저장소 없이도 같은 세션에서 앞서 받은 답(result.text)이 반말이면 다음 턴 채움 말은 반말
+    class H(SlowHermes):
+        async def chat_stream(self, text, sid, model, on_delta, on_tool):
+            if not self.calls:
+                self.calls.append(text)
+                await on_delta("응, 알겠어. ")
+                return TurnResult(text="응, 알겠어. 금방 찾아볼게.", session_id=sid)
+            return await super().chat_stream(text, sid, model, on_delta, on_tool)
+
+    async def main():
+        ws, tts = FakeWS(), ShortTTS()
+        s = VoiceSession(ws, FakeSTT(), tts, H(first_delay=0.65))
+        s.endpointer = FakeEP()
+        s.style_note = ""
+        s.speaker_task = asyncio.create_task(s._speaker())
+        await s._on_text(json.dumps({"type": "hello", "resume": None}))
+        await s._on_text(json.dumps({"type": "text", "text": "찾아 줘"}))
+        await asyncio.sleep(0.3)
+        await s._on_text(json.dumps({"type": "text", "text": "서울 날씨 어때?"}))
+        await asyncio.sleep(1.2)
+        s.speaker_task.cancel()
+        return ws
+    said = spoken(run(main()))
+    fills = [t for t in said if t in FILLER_TEXTS]
+    assert fills and fills[0] in FILLERS_CASUAL and fills[1] == FILLER_GENERIC_CASUAL[0], said
+
+
+def test_forced_formal_ignores_casual_history(fast, tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "FILLER_STYLE", "formal")
+    h = SlowHermes(first_delay=0.65)
+    s, ws = run(_ask_after(_casual_store(tmp_path), "sid-1", h))
+    fills = [t for t in spoken(ws) if t != ANSWER]
+    assert fills[0] in FILLERS and fills[1] == FILLER_GENERIC[0]
