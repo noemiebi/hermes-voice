@@ -195,3 +195,6 @@ PITCH_MARGIN = float(os.environ.get("PITCH_MARGIN", "2.5"))        # 판정 구�
 PITCH_MIN_WIDTH = float(os.environ.get("PITCH_MIN_WIDTH", "0.15"))  # 판정 구간 최소 반폭(±15%)
 PITCH_MIN_DB = float(os.environ.get("PITCH_MIN_DB", "-45"))        # 이보다 작은 창(RMS dBFS)은 F0 추정에서 뺌
 PITCH_SAVE_INTERVAL_S = float(os.environ.get("PITCH_SAVE_INTERVAL_S", "60"))  # 프로필 저장 최소 간격
+
+# 대화 중 Tailscale 직접 경로 유지: 이 간격(초)마다 `tailscale ping`으로 경로 탐색을 재촉(0이면 끔). 릴레이 전환 뒤 다운링크 저하 완화(2026-11-04)
+NET_NUDGE_S = float(os.environ.get("NET_NUDGE_S", "20"))

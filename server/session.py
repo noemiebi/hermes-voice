@@ -351,6 +351,9 @@ class VoiceSession:
             await self._cancel_turn()
             if self.speaker_task:
                 self.speaker_task.cancel()
+                t = getattr(self, "_net_task", None)
+                if t and not t.done():
+                    t.cancel()
 
     async def _on_audio(self, data: bytes) -> None:
         if self.listening:  # 누르고 말하기가 우선
@@ -535,6 +538,41 @@ class VoiceSession:
             log.info("덕킹 검사(%s): pre %.1f dB -> %.1f dB (%.1f dB 하강, hold 뒤 %.0f ms) -> 사용자 말, 끼어들기 확정",
                      how, pre, val, pre - val, took)
             await self.interrupt(announce=False, notify=True)
+
+    async def _net_nudge_loop(self) -> None:
+        """대화가 켜진 동안 NET_NUDGE_S마다 클라이언트에게 tailscale ping(직접 경로 유지). 경로가 바뀌면 로그."""
+        client = getattr(self.ws, "client", None)
+        ip = getattr(client, "host", None)
+        if not ip or config.NET_NUDGE_S <= 0:
+            return
+        from . import netpath
+        last = None
+        try:
+            while self.conversation:
+                res = await netpath.nudge(ip)
+                desc = await netpath.peer_path(ip)
+                if desc and desc != last:
+                    log.info("네트워크 경로(%s): %s%s", ip, desc, f" (ping: {res})" if res and last is None else "")
+                    last = desc
+                await asyncio.sleep(config.NET_NUDGE_S)
+        except asyncio.CancelledError:
+            pass
+        except Exception:  # noqa: BLE001
+            log.debug("net nudge 종료", exc_info=True)
+
+    async def _log_netpath(self) -> None:
+        """재생 지연이 났을 때 클라이언트와의 Tailscale 경로를 로그에 남긴다(20초 캐시, 실패는 조용히)."""
+        client = getattr(self.ws, "client", None)
+        ip = getattr(client, "host", None)
+        if not ip:
+            return
+        try:
+            from . import netpath
+            desc = await netpath.peer_path(ip)
+        except Exception:  # noqa: BLE001
+            return
+        if desc:
+            log.info("네트워크 경로(%s): %s", ip, desc)
 
     def _confirm_ms(self) -> int:
         """hold 확정 카운터: 말소리 창 시간에서 에코 우세 창을 뺀 것."""
@@ -826,6 +864,7 @@ class VoiceSession:
             log.info("재생 지연: 클라이언트 %.1f s 뒤처짐 (pos %.0f ms, 예상 %.0f ms) 전송 %.0f KB(첫 전송 뒤 %.1f s, "
                      "마지막 전송 %.1f s 전, %s %d Hz)", lag, pos, exp, tx["bytes"] / 1024, now - tx["t0"],
                      now - tx["t1"], self.out_codec, self.out_rate)
+            asyncio.create_task(self._log_netpath())  # Tailscale 경로(직접/릴레이) 참고 로그
 
     def _barge_mode(self) -> bool:
         """끼어들기 기준(엄격)을 쓸 상황: 턴이 생각·말하는 중이거나, 보낼 문장이 남았거나, 스피커 재생 중.
@@ -850,10 +889,15 @@ class VoiceSession:
             self.listening = False
             await self.set_state(self.rest_state())
             log.info("conversation on")
+            if getattr(self, "_net_task", None) is None or self._net_task.done():
+                self._net_task = asyncio.create_task(self._net_nudge_loop())
         else:
             if not self.conversation:
                 return
             self.conversation = False
+            t = getattr(self, "_net_task", None)
+            if t and not t.done():
+                t.cancel()
             if self.endpointer is not None:
                 self.endpointer.reset()
             self._carry = b""

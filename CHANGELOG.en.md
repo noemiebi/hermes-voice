@@ -6,6 +6,9 @@ What changed in each version, and why. Each entry follows symptom → cause → 
 
 ## 0.7.0 (2026-11-03) — app v52
 
+**Keeping and logging the Tailscale path (server)**
+When the audio chopped, the Tailscale link between the Mac and the iPhone had no direct path and was going through the Tokyo relay; a single ping brought it back to the direct LAN path. During a conversation the server now runs `tailscale ping` every `NET_NUDGE_S` seconds (default 20) to prompt direct-path discovery, and logs the current path (direct/relay) whenever playback lag is detected.
+
 **Voice silent for a while, then choppy**
 The reply text appeared in full, but there was no sound at all for 10 seconds, and then it played in roughly one-second bursts (field log 23:38; same pattern at 22:25). The server had synthesized and sent three sentences within a second, yet the client had received 0 s of audio for 10 seconds, while small messages on the same connection (captions, diagnostics) and the microphone uplink were fine. Only the large binary frames (44.1 kHz int16, 88 KB/s) were late, so the cause appears to be stretches where downlink throughput drops to a few tens of KB/s (Tailscale path changes, Wi-Fi power saving, and so on). The network can't be fixed from here, so this release sends less data and stutters less when the link slows.
 - **(server)** Audio is now sent at 24 kHz (`AUDIO_OUT_RATE`, default `24000`; `44100` also works), about 48 KB/s, nearly half. Supertonic output is resampled to 24 kHz after shaping; Qwen is already 24 kHz and is passed through. The echo-correlation reference, playback position and 0.5 s chunking follow this rate.

@@ -182,6 +182,7 @@ curl -s http://127.0.0.1:8480/health
 | `TTS_PROVIDER` | `cpu` | `coreml`도 되지만 측정상 CPU가 더 빠름 |
 | `AUDIO_OUT_RATE` | `24000` | 클라이언트로 보내는 TTS 오디오 샘플레이트(Hz). `44100`도 가능(0.6.x까지 기본). 두 엔진 모두 이 레이트로 내보내고 `ready.out_sample_rate`로 알림. 24 kHz pcm16은 초당 48 KB(44.1 kHz는 88 KB) |
 | `AUDIO_OUT_CODEC` | `pcm16` | 오디오 프레임 부호화. `mulaw`면 G.711 μ-law 8비트(초당 24 KB @24 kHz, 음질은 전화 수준으로 약간 거칠어짐). 다운링크가 자주 느린 망에서 시도 |
+| `NET_NUDGE_S` | `20` | 대화 중 이 간격(초)마다 서버가 클라이언트에게 `tailscale ping`을 보내 직접 경로를 유지합니다(릴레이로 떨어지면 다운링크가 느려져 소리가 끊김). `0`이면 끔. Tailscale이 없으면 아무 일도 안 함 |
 | `TTS_TARGET_RMS_DB` / `TTS_PEAK_DB` | `-18` / `-1` | 합성 결과 라우드니스 정규화(음성 구간 RMS 목표, 피크 상한) |
 | `TTS_ENGLISH_MODE` | `keep` | 독음 정규화(`server/tts_text.py`)에서 사전에 없는 영어 단어를 그대로 둠. `spell`이면 글자별로 읽음(약어·한 글자 대문자는 항상 글자별) |
 | `TTS_LEXICON_USER` | `$VOICE_DATA_DIR/tts-lexicon.tsv` | 사용자 독음 사전(`영문<TAB>한글`, `#` 주석). 기본 사전 `server/tts_lexicon.tsv`보다 우선, 없으면 무시 |
