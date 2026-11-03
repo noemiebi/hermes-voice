@@ -1468,8 +1468,15 @@ class VoiceSession:
 
         async def filler_loop() -> None:
             """첫 토큰 전 긴 대기를 채움 말로 메운다(docs/프로토콜.md '채움 말')."""
+            loop = asyncio.get_running_loop()
+            t_start = loop.time()
             try:
                 await asyncio.wait_for(fill["wake"].wait(), config.FILLER_FIRST_S)
+                # 도구 시작이 와도 바로 말하지 않고 FILLER_TOOL_DELAY_S 더 기다린다(그 사이 첫 토큰이 오면 생략).
+                # 단 턴 시작부터 FILLER_FIRST_S를 넘기지는 않는다
+                rest = min(config.FILLER_TOOL_DELAY_S, config.FILLER_FIRST_S - (loop.time() - t_start))
+                if rest > 0:
+                    await asyncio.sleep(rest)
             except asyncio.TimeoutError:
                 pass
             if not live() or spoke["any"] or config.FILLER_MAX < 1:
@@ -1609,8 +1616,26 @@ class VoiceSession:
                      first_ms or 0, int((time.perf_counter() - t0) * 1000), total / OUT_RATE, item)
         return started
 
+    async def _filler_gap(self, gen: int, filler_end: float) -> None:
+        """채움 말을 재생한 답의 첫 본문 문장 전: 채움 말 재생 끝 + FILLER_GAP_S까지 기다린다.
+        끼어들기·interrupt로 generation이 바뀌면 즉시 돌아간다."""
+        lead = self._play_lead_s(gen)
+        end = (self.clock() + lead) if lead > 0 else filler_end  # 아직 재생 중이면 지금 추정, 끝났으면 기록한 끝
+        wait = end + config.FILLER_GAP_S - self.clock()
+        if wait <= 0:
+            return
+        log.info("채움 말 뒤 여유 %d ms", int(wait * 1000))
+        deadline = self.clock() + wait
+        while gen == self.generation:
+            left = deadline - self.clock()
+            if left <= 0:
+                break
+            await asyncio.sleep(min(left, 0.05))
+
     async def _speaker(self) -> None:
         sent_gen = None  # 오디오를 보낸 generation
+        filler_gen, filler_end = None, 0.0  # 채움 말을 재생한 generation과 그 재생 끝 추정 시각(clock)
+        gap_gen = None  # 채움 말 뒤 여유를 이미 둔 generation(답마다 첫 본문 문장 한 번)
         while True:
             gen, item = await self._next_item()
             if gen != self.generation:
@@ -1640,6 +1665,11 @@ class VoiceSession:
                 log.debug("독음: %s -> %s", item, spoken)
             if not spoken:
                 continue  # 기호만 있던 문장은 읽지 않는다
+            if not _is_filler(item) and filler_gen == gen and gap_gen != gen:
+                gap_gen = gen
+                await self._filler_gap(gen, filler_end)
+                if gen != self.generation:
+                    continue
             self._speaking_now = True
             try:
                 if hasattr(self.tts, "synth_stream"):  # 스트리밍 엔진(TTSRouter: Qwen 또는 Supertonic 폴백)
@@ -1647,6 +1677,8 @@ class VoiceSession:
                     lead = self._play_lead_s(gen) if sent_gen == gen else 0.0
                     if await self._speak_stream(gen, item, spoken, lead_s=lead):
                         sent_gen = gen
+                        if _is_filler(item):
+                            filler_gen, filler_end = gen, self._est_play_end(gen)
                     continue
                 try:
                     res = await self.tts.synth(spoken, is_current=lambda g=gen: g == self.generation)
@@ -1679,5 +1711,7 @@ class VoiceSession:
                     if gen != self.generation:
                         break
                     await self.send_audio(gen, pcm[i:i + CHUNK_SAMPLES].tobytes())
+                if _is_filler(item):
+                    filler_gen, filler_end = gen, self._est_play_end(gen)
             finally:
                 self._speaking_now = False

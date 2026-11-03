@@ -12,6 +12,9 @@ The "Keep playing when the screen is off" attempt from 0.6.8 (a silent audio loo
 **Telling my own voice apart by pitch (server)**
 When the mic picked up speech during an answer, the server ran a duck test (dropping the volume to 20%) to tell echo from the user, and the volume dipped every time. The user's voice (median F0 about 109 Hz) and Supertonic F1 (about 218 Hz) are almost an octave apart, so the server now checks the pitch of the first 400 ms first. In the TTS range it keeps playing without ducking (the end-of-utterance text check stays, and it checks once more if the speech runs past 900 ms); in the user's range it barges in right away. Ambiguous cases fall back to the duck test as before. The TTS range is measured at server start by synthesizing four sentences in the current voice; the user range is built from transcribed utterances that did not overlap playback and kept in `voice_profile.json`. It is not used until 5 user utterances are collected. `PITCH_GATE=0` disables it.
 
+**Gentler filler timing (server)**
+Fillers felt forced, and the answer started right on the heels of a filler with no breathing room (on device: filler at 4.0 s, first token 0.5–0.8 s later). The first filler came early at 4 s, a tool-start event triggered one immediately, and nothing kept a gap between a filler and the answer. Now the first filler comes at 6 s (`FILLER_FIRST_S`), later ones every 14 s (`FILLER_EVERY_S`), at most 3 per turn (`FILLER_MAX`). A tool-start event waits another 2 s (`FILLER_TOOL_DELAY_S`) and drops the filler if the answer arrives meanwhile (never later than 6 s into the turn). When a filler was actually played, the first answer sentence starts 0.5 s (`FILLER_GAP_S`) after the filler finishes (cut short immediately on barge-in).
+
 ## 0.6.8 (2026-11-03) — app v50
 
 **Audio kept cutting out during playback**

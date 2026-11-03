@@ -58,6 +58,8 @@ def fast(monkeypatch):
     monkeypatch.setattr(config, "FILLER_EVERY_S", 0.3)
     monkeypatch.setattr(config, "FILLER_MAX", 4)
     monkeypatch.setattr(config, "FILLER_STYLE", "auto")
+    monkeypatch.setattr(config, "FILLER_TOOL_DELAY_S", 0.0)  # 아래 전용 시험에서만 켠다
+    monkeypatch.setattr(config, "FILLER_GAP_S", 0.0)
 
 
 async def ask(hermes, tts=None, wait=1.2):
@@ -186,6 +188,105 @@ def test_interrupt_cancels_scheduler(fast):
     s, ws, n = run(main())
     assert n == 1 and len(ws.of("speak_start")) == 1
     assert s._filler_task is None
+
+
+# ---------- 타이밍 완화(FILLER_TOOL_DELAY_S, FILLER_GAP_S) ----------
+def test_new_defaults_in_config_source():
+    # .env를 다시 읽지 않게 config.py 소스의 기본값 문자열을 확인한다
+    src = (Path(config.__file__)).read_text(encoding="utf-8")
+    for name, val in (("FILLER_FIRST_S", "6.0"), ("FILLER_EVERY_S", "14.0"), ("FILLER_MAX", "3"),
+                      ("FILLER_TOOL_DELAY_S", "2.0"), ("FILLER_GAP_S", "0.5")):
+        assert f'os.environ.get("{name}", "{val}")' in src, name
+
+
+def test_tool_delay_skips_filler_when_token_comes_soon(fast, monkeypatch):
+    # 도구 시작 0.05 s, 지연 0.4 s → 0.45 s 전에 첫 토큰(0.25 s)이 오면 채움 말 없음
+    monkeypatch.setattr(config, "FILLER_FIRST_S", 5.0)
+    monkeypatch.setattr(config, "FILLER_TOOL_DELAY_S", 0.4)
+    s, ws, _ = run(ask(SlowHermes(first_delay=0.25, tools=[(0.05, "web_search")]), wait=0.6))
+    assert spoken(ws) == [ANSWER]
+
+
+def test_tool_delay_then_filler(fast, monkeypatch):
+    monkeypatch.setattr(config, "FILLER_FIRST_S", 5.0)
+    monkeypatch.setattr(config, "FILLER_TOOL_DELAY_S", 0.2)
+    s, ws, _ = run(ask(SlowHermes(first_delay=0.5, tools=[(0.05, "web_search")]), wait=0.8))
+    said = spoken(ws)
+    assert said[0] in FILLERS and said[-1] == ANSWER and len(said) == 2
+
+
+def test_tool_delay_capped_by_first_delay(fast, monkeypatch):
+    # 지연이 길어도 턴 시작 뒤 FILLER_FIRST_S(0.3 s)를 넘기지 않는다
+    monkeypatch.setattr(config, "FILLER_FIRST_S", 0.3)
+    monkeypatch.setattr(config, "FILLER_TOOL_DELAY_S", 5.0)
+    monkeypatch.setattr(config, "FILLER_EVERY_S", 5.0)
+    s, ws, _ = run(ask(SlowHermes(first_delay=0.5, tools=[(0.2, "web_search")]), wait=0.8))
+    said = spoken(ws)
+    assert said[0] in FILLERS and said[-1] == ANSWER and len(said) == 2
+
+
+class TimedTTS(ShortTTS):
+    """채움 말은 0.3 s 오디오, 합성 시작 시각을 기록한다."""
+
+    def __init__(self):
+        super().__init__()
+        self.at = {}
+
+    async def synth(self, text, is_current=lambda: True):
+        self.at[text] = asyncio.get_running_loop().time()
+        await asyncio.sleep(0.005)
+        if not is_current():
+            return None
+        self.texts.append(text)
+        n = int(0.3 * 44100) if text in FILLER_TEXTS else 441
+        return np.zeros(n, dtype=np.int16), 1
+
+
+def test_gap_after_played_filler(fast, monkeypatch, caplog):
+    # 채움 말(0.3 s 재생) 직후 답이 와도 본문은 채움 말 재생 끝 + FILLER_GAP_S(0.4 s) 뒤에 나간다
+    import logging
+    caplog.set_level(logging.INFO, logger="session")
+    monkeypatch.setattr(config, "FILLER_GAP_S", 0.4)
+    s, ws, tts = run(ask(SlowHermes(first_delay=0.25), tts=TimedTTS(), wait=1.4))
+    said = spoken(ws)
+    assert said[0] in FILLERS and said[-1] == ANSWER and len(said) == 2
+    gap = tts.at[ANSWER] - tts.at[said[0]]
+    assert 0.3 + 0.4 - 0.05 <= gap < 1.1, gap
+    assert "채움 말 뒤 여유" in caplog.text
+
+
+def test_no_gap_without_filler(fast, monkeypatch, caplog):
+    import logging
+    caplog.set_level(logging.INFO, logger="session")
+    monkeypatch.setattr(config, "FILLER_GAP_S", 2.0)
+    s, ws, tts = run(ask(SlowHermes(first_delay=0.05), tts=TimedTTS(), wait=0.4))
+    assert spoken(ws) == [ANSWER]
+    assert "채움 말 뒤 여유" not in caplog.text
+
+
+def test_gap_aborts_on_interrupt(fast, monkeypatch):
+    # 여유를 기다리는 중 끼어들면 본문은 안 나가고, 다음 턴 답은 바로 나간다(여유 대기에 묶이지 않음)
+    monkeypatch.setattr(config, "FILLER_GAP_S", 5.0)
+
+    async def main():
+        ws, tts = FakeWS(), TimedTTS()
+        h = SlowHermes(first_delay=0.25)
+        s = VoiceSession(ws, FakeSTT(), tts, h)
+        s.endpointer = FakeEP()
+        s.style_note = ""
+        s.speaker_task = asyncio.create_task(s._speaker())
+        await s._on_text(json.dumps({"type": "hello", "resume": None}))
+        await s._on_text(json.dumps({"type": "text", "text": "서울 날씨 어때?"}))
+        await asyncio.sleep(0.6)             # 채움 말 재생 뒤 본문이 여유 대기 중
+        assert ANSWER not in spoken(ws)
+        await s.interrupt()
+        h.first_delay = 0.0
+        await s._on_text(json.dumps({"type": "text", "text": "다시 알려 줘"}))
+        await asyncio.sleep(0.3)
+        s.speaker_task.cancel()
+        return ws
+    said = spoken(run(main()))
+    assert said[0] in FILLERS and said[1:] == [ANSWER], said
 
 
 # ---------- 채움 말 문체(FILLER_STYLE) ----------

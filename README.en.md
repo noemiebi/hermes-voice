@@ -140,9 +140,11 @@ Path variables fall back to their defaults when left empty.
 | `VOICE_ALLOWED_ORIGINS` | (empty) | Other origins allowed to connect to `/ws` (comma-separated, e.g. `https://a.example:8443`, or `*`). Same-origin clients and clients without an Origin header are always allowed |
 | `VOICE_SESSION_IDLE_HOURS` | `0` (off) | If positive, starting a conversation this long after the last turn opens a new Hermes session. Never switches mid-conversation. When off, a new conversation only starts via the on-screen `+` button |
 | `FILLER_ENABLED` | `1` | Short filler lines ("잠깐 확인해 볼게요." etc.) while waiting a long time for an answer. `0` turns them all off (including the one on tool start) |
-| `FILLER_FIRST_S` | `4.0` | Seconds before the first filler while no token has arrived (immediately on a tool-start event) |
-| `FILLER_EVERY_S` | `8.0` | Interval between further fillers until the first token. Skipped while the previous filler is still playing |
-| `FILLER_MAX` | `4` | Maximum fillers per turn |
+| `FILLER_FIRST_S` | `6.0` | Seconds before the first filler while no token has arrived (on a tool-start event, `FILLER_TOOL_DELAY_S` after it, but never later than this) |
+| `FILLER_TOOL_DELAY_S` | `2.0` | Extra seconds to wait after a tool-start event before the first filler; skipped if the first token arrives meanwhile |
+| `FILLER_EVERY_S` | `14.0` | Interval between further fillers until the first token. Skipped while the previous filler is still playing |
+| `FILLER_MAX` | `3` | Maximum fillers per turn |
+| `FILLER_GAP_S` | `0.5` | In answers where a filler was played, minimum seconds between the end of the filler and the first answer sentence |
 | `FILLER_STYLE` | `auto` | Filler speech level. `formal` (polite) · `casual` (banmal) · `auto` (each turn, follow the sentence endings of this session's recent answers; polite when there is nothing to go on) |
 | `VOICE_DATA_DIR` | `~/.hermes/voice` | Server data folder (created if missing). Holds conversation history and the last session (`history.json`), the user pronunciation lexicon, and the STT correction table |
 | `PORT` / `HOST` | `8480` / `127.0.0.1` | Bind address. Expose externally through a reverse proxy (tailscale serve, etc.) |

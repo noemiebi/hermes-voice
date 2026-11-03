@@ -101,12 +101,16 @@ QWEN_TTS_TURN_SEED = os.environ.get("QWEN_TTS_TURN_SEED", "0").strip().lower() i
 TTS_ENGLISH_MODE = os.environ.setdefault("TTS_ENGLISH_MODE", "keep").strip().lower()
 TTS_LEXICON_USER = os.environ.setdefault("TTS_LEXICON_USER", str(VOICE_DATA_DIR / "tts-lexicon.tsv"))
 
-# 긴 대기 중 채움 말(docs/프로토콜.md '채움 말'): 첫 토큰 전 FILLER_FIRST_S(도구 시작 이벤트가 오면 즉시)에 첫 마디,
-# 그 뒤 첫 토큰까지 FILLER_EVERY_S마다 하나씩, 한 턴에 FILLER_MAX개까지. FILLER_ENABLED=0이면 채움 말 전부 끔
+# 긴 대기 중 채움 말(docs/프로토콜.md '채움 말'): 첫 토큰 전 FILLER_FIRST_S에 첫 마디(도구 시작 이벤트가 오면
+# 그때부터 FILLER_TOOL_DELAY_S 뒤, 단 FILLER_FIRST_S를 넘지 않게), 그 뒤 첫 토큰까지 FILLER_EVERY_S마다 하나씩,
+# 한 턴에 FILLER_MAX개까지. 채움 말을 실제로 재생한 답은 첫 본문 문장을 채움 말 재생 끝 + FILLER_GAP_S 뒤에 보낸다.
+# FILLER_ENABLED=0이면 채움 말 전부 끔
 FILLER_ENABLED = os.environ.get("FILLER_ENABLED", "1").strip().lower() not in ("", "0", "false", "no", "off")
-FILLER_FIRST_S = float(os.environ.get("FILLER_FIRST_S", "4.0"))
-FILLER_EVERY_S = float(os.environ.get("FILLER_EVERY_S", "8.0"))
-FILLER_MAX = int(os.environ.get("FILLER_MAX", "4"))
+FILLER_FIRST_S = float(os.environ.get("FILLER_FIRST_S", "6.0"))
+FILLER_EVERY_S = float(os.environ.get("FILLER_EVERY_S", "14.0"))
+FILLER_MAX = int(os.environ.get("FILLER_MAX", "3"))
+FILLER_TOOL_DELAY_S = float(os.environ.get("FILLER_TOOL_DELAY_S", "2.0"))
+FILLER_GAP_S = float(os.environ.get("FILLER_GAP_S", "0.5"))
 # 채움 말 문체: formal(존댓말) | casual(반말) | auto(매 턴 이 세션 최근 답의 문장 끝으로 판정, 근거 없으면 formal)
 FILLER_STYLE = os.environ.get("FILLER_STYLE", "auto").strip().lower()
 if FILLER_STYLE not in ("formal", "casual", "auto"):
