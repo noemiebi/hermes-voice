@@ -199,7 +199,9 @@ class QwenPostProcessor:
 
     def __init__(self, sr_in: int, gain_db: float, peak_db: float = -1.0, tempo: float = 1.0,
                  tail_ms: float = config.QWEN_TTS_TAIL_MS, fade_ms: float = config.QWEN_TTS_FADE_MS):
-        self.trim = SilenceTrimmer(sr_in, tail_s=tail_ms / 1000)
+        # 끝 무음은 거의 다 잘라 내고(20 ms), 신축·리샘플 뒤에 정확히 tail_ms 무음을 붙인다(템포와 무관한 쉼)
+        self.trim = SilenceTrimmer(sr_in, tail_s=0.02)
+        self.tail_n = max(0, int(OUT_RATE * tail_ms / 1000))
         self.tempo = TempoStretcher(sr_in, tempo)
         self.rs = StreamResampler(sr_in, OUT_RATE)
         self.gain = 10 ** (gain_db / 20)
@@ -233,7 +235,10 @@ class QwenPostProcessor:
         t = self.tempo.push(self.trim.flush())
         t = np.concatenate([t, self.tempo.flush()])
         y = self.rs.push(t) if t.size else np.zeros(0)
-        return self._finish(np.concatenate([y, self.rs.flush()]), last=True)
+        out = self._finish(np.concatenate([y, self.rs.flush()]), last=True)
+        if out.size and self.tail_n:
+            out = np.concatenate([out, np.zeros(self.tail_n, dtype=np.int16)])
+        return out
 
 
 # ---------------------------------------------------------------- 워커 엔진

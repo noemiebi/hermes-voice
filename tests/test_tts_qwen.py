@@ -12,6 +12,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from test_session_hold import FakeHermes, FakeSTT, FakeWS  # noqa: E402
 
+from server import config  # noqa: E402
 from server.session import VoiceSession  # noqa: E402
 from server.tts_qwen import (  # noqa: E402
     QwenPostProcessor, QwenTTSEngine, StreamResampler, TempoStretcher, TTSRouter, soft_limit)
@@ -135,7 +136,8 @@ def test_engine_streams_three_chunks(tmp_path):
     assert len(chunks) >= 3
     assert all(c.dtype == np.int16 for c in chunks)
     total = sum(c.size for c in chunks)
-    assert abs(total - int(0.6 * 44100)) < 44100 * 0.1
+    tail = int(44100 * config.QWEN_TTS_TAIL_MS / 1000)   # 문장 끝에 붙이는 쉼
+    assert abs(total - int(0.6 * 44100) - tail) < 44100 * 0.1
 
 
 def test_engine_cancel_on_close_and_not_current(tmp_path):
@@ -511,7 +513,7 @@ def seeds(log: Path) -> dict:
 def test_session_turn_seed(tmp_path):
     async def main():
         s, ws, router, st, log = await make_session(tmp_path)
-        assert s.turn_seed is False                              # 기본 끔: seed 안 보냄
+        s.turn_seed = False                                      # .env 값과 무관하게 끔부터 시험
         s.generation = 1
         await s._speak_stream(1, "끔 하나", "끔 하나")
         s.turn_seed = True
