@@ -348,13 +348,19 @@ class EchoGate:
         """상관 규칙. 반환 (상태 문자열, 에코?)."""
         self._ref_now = None
         ts = np.asarray(self._t)
-        mic = np.asarray(self._db, dtype=np.float64)
+        mic_all = np.asarray(self._db, dtype=np.float64)
         # [lag, 창] 시각에 스피커에서 나오던 참조 위치 -> 포락선
         tt = ts[None, :] - self.lags[:, None]
-        envs = ref.env_at(timeline.pos_at(tt)).astype(np.float64)
-        loud = envs.max(axis=1) >= REF_SILENT_DB
+        envs_all = ref.env_at(timeline.pos_at(tt)).astype(np.float64)
+        loud = envs_all.max(axis=1) >= REF_SILENT_DB
         if not loud.any():
             return "보류", False
+        # 디지털 무음 창(마이크 dB 하한, iOS가 재생 중 입력을 0으로 보냄: 실기 17:46 입력 -180 dBFS)은 상관에서 뺀다.
+        # 섞어 두면 무음->에코 계단이 아무 lag와나 상관을 만들어 lag 점수가 엉뚱한 lag(412, -100 ms)로 튀었다.
+        live = mic_all > DB_FLOOR + 0.5
+        if int(live.sum()) < self.W // 2:
+            return "보류", False
+        mic, envs = mic_all[live], envs_all[:, live]
         mc = mic - mic.mean()
         mn = float(np.sqrt(np.sum(mc * mc)))
         ec = envs - envs.mean(axis=1, keepdims=True)
@@ -375,7 +381,8 @@ class EchoGate:
         k = max(cand, key=lambda i: corr[i])
         res.corr = float(corr[k])
         res.lag_ms = float(self.lags[k] * 1000.0)
-        ref_row = envs[k]
+        ref_row = envs_all[k]
+        mic = mic_all
         r = self.NEAR
         pad = np.concatenate([np.full(r, DB_FLOOR), ref_row, np.full(r, DB_FLOOR)])
         near = np.max(np.stack([pad[i:i + len(ref_row)] for i in range(2 * r + 1)]), axis=0)

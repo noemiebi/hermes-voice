@@ -344,3 +344,218 @@ def test_duck_skip_not_revoked_without_non_echo():
         assert not ws.of("hold") and not s.holding
         s.speaker_task.cancel()
     asyncio.run(go())
+
+
+# ---------- 덕킹 에코 확정 뒤 발화의 나머지(DUCK_ECHO_RISE_*) ----------
+
+async def feed_playing(s, gen, db, ms_total, seed=0):
+    """재생 보고(pos_ms)를 곁들여 입력을 보낸다(재생 중 유지)."""
+    for i in range(ms_total // 96):
+        s.clock.t += 0.096
+        if i % 3 == 0:
+            await s._on_text(json.dumps({"type": "playback", "state": "speaking", "generation": gen,
+                                         "pos_ms": 1000 + (s.clock.t - 100) * 1000}))
+        await s._on_audio(chunk(db, seed=seed + i))
+
+
+async def duck_echo_resumed(s, ws, gen):
+    await hold_now(s)
+    await feed_playing(s, gen, -53, 288, seed=200)      # 덕킹 뒤 9 dB 하강 -> 에코, 재생 복귀
+    assert ws.of("resume") and not ws.of("interrupt") and not s.holding
+    assert s._duck_echo is not None and s._duck_echo["gen"] == gen
+
+
+def test_duck_echo_rest_dropped_without_stt():
+    async def go():
+        s, ws, stt, hermes, gen = await setup_duck()
+        await duck_echo_resumed(s, ws, gen)
+        await feed_playing(s, gen, -44, 384, seed=210)  # 복귀 뒤 에코가 pre 레벨로 이어짐
+        stt.text = "11월 9일에 치고"
+        s.endpointer.in_speech = False
+        await s._on_vad(VADEvent("end", pcm=b"\0\0" * 16000, speech_ms=1216))
+        await settle()
+        assert stt.calls == 0 and not ws.of("transcript") and s.generation == gen
+        assert len(hermes.calls) == 1
+        s.speaker_task.cancel()
+    asyncio.run(go())
+
+
+def test_duck_echo_rest_with_rise_goes_to_stt():
+    async def go():
+        s, ws, stt, hermes, gen = await setup_duck()
+        await duck_echo_resumed(s, ws, gen)
+        await feed_playing(s, gen, -30, 384, seed=220)  # pre(-44)보다 14 dB 높게 384 ms -> 사용자가 뒤이어 말함
+        stt.text = "잠깐 그거 말고 내일 일정 알려 줘"
+        s.endpointer.in_speech = False
+        await s._on_vad(VADEvent("end", pcm=b"\0\0" * 16000, speech_ms=1500))
+        await settle()
+        assert stt.calls == 1 and ws.of("transcript")[-1]["text"] == stt.text
+        s.speaker_task.cancel()
+    asyncio.run(go())
+
+
+def test_duck_echo_rest_with_rise_still_text_filtered():
+    async def go():
+        s, ws, stt, hermes, gen = await setup_duck()
+        await duck_echo_resumed(s, ws, gen)
+        await feed_playing(s, gen, -30, 384, seed=230)
+        stt.text = "오늘 서울은 맑고 낮 기온은"      # 받아쓴 게 방금 읽은 답 -> 텍스트 에코 필터
+        s.endpointer.in_speech = False
+        await s._on_vad(VADEvent("end", pcm=b"\0\0" * 16000, speech_ms=1500))
+        await settle()
+        assert stt.calls == 1 and not ws.of("transcript")
+        s.speaker_task.cancel()
+    asyncio.run(go())
+
+
+def test_duck_echo_long_rest_rechecks():
+    async def go():
+        s, ws, stt, hermes, gen = await setup_duck()
+        await duck_echo_resumed(s, ws, gen)
+        assert len(ws.of("hold")) == 1
+        await feed_playing(s, gen, -44, 960, seed=240)  # 복귀 뒤 900 ms 넘게 이어짐 -> 덕킹 재검사
+        assert len(ws.of("hold")) == 2 and s.holding
+        await feed_playing(s, gen, -43, 384, seed=250)  # 줄여도 그대로 -> 사용자 말, 끼어들기 확정
+        assert ws.of("interrupt") and not s.holding and s._duck_echo is None
+        s.speaker_task.cancel()
+    asyncio.run(go())
+
+
+def test_duck_echo_recheck_echo_keeps_mark_once():
+    async def go():
+        s, ws, stt, hermes, gen = await setup_duck()
+        await duck_echo_resumed(s, ws, gen)
+        await feed_playing(s, gen, -44, 960, seed=260)
+        assert len(ws.of("hold")) == 2
+        await feed_playing(s, gen, -56, 288, seed=270)  # 다시 에코 -> 복귀, 표시 유지
+        assert len(ws.of("resume")) == 2 and not ws.of("interrupt")
+        assert s._duck_echo is not None and s._duck_echo["rechecked"]
+        await feed_playing(s, gen, -44, 1152, seed=280)  # 재검사는 한 번만
+        assert len(ws.of("hold")) == 2
+        s.endpointer.in_speech = False
+        await s._on_vad(VADEvent("end", pcm=b"\0\0" * 16000, speech_ms=2400))
+        await settle()
+        assert stt.calls == 0 and not ws.of("transcript")
+        s.speaker_task.cancel()
+    asyncio.run(go())
+
+
+# ---------- 짧은 에코 조각 완화 필터·옛 재생 보고 ----------
+
+def test_short_numeric_fragment_after_stale_playback():
+    """실기 17:46: 에코 발화가 새 턴을 열어 generation이 바뀐 뒤에도 클라이언트는 옛 답을 계속 재생했다.
+    옛 generation 재생 보고로 에코 검사를 켜고, 짧은 숫자 조각('2020년')은 완화 필터로 버린다."""
+    async def go():
+        s, ws, stt, hermes, gen = await setup_skip()
+        s.echo.add("6월에 3번(1일, 18일, 25일), 7월에 3번(2일, 14일, 20일)이에요.")
+        # interrupt 없이 generation만 바뀐 상황(예: 판정 전 경로로 열린 턴이 버려짐)
+        s.generation += 1
+        n_tr = len(ws.of("transcript"))
+        # 클라이언트는 옛 답(gen)을 계속 재생 중(서버는 옛 generation 보고라 재생 아님으로 봄)
+        for i in range(8):
+            s.clock.t += 0.25
+            await s._on_text(json.dumps({"type": "playback", "state": "speaking", "generation": gen,
+                                         "pos_ms": 5000 + i * 250}))
+        assert not s._playing() and s._stale_playing()
+        s.endpointer.in_speech = True
+        await s._on_vad(VADEvent("start"))
+        assert not ws.of("hold")
+        stt.text = "2020년"
+        s.endpointer.in_speech = False
+        await s._on_vad(VADEvent("end", pcm=b"\0\0" * 16000, speech_ms=800))
+        await settle()
+        assert len(ws.of("transcript")) == n_tr
+        # 옛 재생이 끝나면(idle) 꼬리 가드, 그 뒤 한참 지나면 숫자도 통과
+        await s._on_text(json.dumps({"type": "playback", "state": "idle", "generation": gen, "pos_ms": 9000}))
+        assert not s._stale_playing() and s._tail_active()
+        s.clock.t += 5.0
+        await s._on_vad(VADEvent("start"))
+        await s._on_vad(VADEvent("end", pcm=b"\0\0" * 16000, speech_ms=800))
+        await settle()
+        assert ws.of("transcript")[-1]["text"] == "2020년"
+        s.speaker_task.cancel()
+    asyncio.run(go())
+
+
+def test_short_fragment_lenient_bigram_needs_gate_fraction():
+    async def go():
+        s, ws, stt, hermes, gen = await setup_duck()
+        s.echo.add("2025년 1월부터 올해 12월까지 확인한 결과고, 9월 이후로는 당직이 없어요.")
+        n_tr = len(ws.of("transcript"))
+        stt.text = "올해 12월 결과는 이후로 없어"   # bigram 0.67: 평소(0.7) 못 잡음
+        s.endpointer.in_speech = False
+        s._echo_check = True
+        await s._on_vad(VADEvent("end", pcm=b"\0\0" * 16000, speech_ms=900, echo_frac=0.4, echo_judged=10))
+        await settle()
+        assert len(ws.of("transcript")) == n_tr
+        # 게이트 에코 비율이 낮으면 완화 bigram은 안 씀
+        s._echo_check = True
+        await s._on_vad(VADEvent("end", pcm=b"\0\0" * 16000, speech_ms=900, echo_frac=0.1, echo_judged=10))
+        await settle()
+        assert len(ws.of("transcript")) == n_tr + 1
+        # 길면(> SHORT_ECHO_MS) 완화 필터 대상 아님
+        stt.text = "1일 9월"                        # 짧으면 숫자 일치(완화)로 버려질 전사
+        s._echo_check = True
+        await s._on_vad(VADEvent("end", pcm=b"\0\0" * 16000, speech_ms=900, echo_frac=0.0, echo_judged=10))
+        await settle()
+        assert len(ws.of("transcript")) == n_tr + 1
+        s._echo_check = True
+        await s._on_vad(VADEvent("end", pcm=b"\0\0" * 16000, speech_ms=1500, echo_frac=0.4, echo_judged=10))
+        await settle()
+        assert ws.of("transcript")[-1]["text"] == "1일 9월"
+        s.speaker_task.cancel()
+    asyncio.run(go())
+
+
+# ---------- 재생 중 끝난 에코 검사 대상 발화: STT 판정 전에는 generation·큐를 건드리지 않음 ----------
+
+def test_echo_fragment_during_playback_keeps_answer():
+    async def go():
+        s, ws, stt, hermes, gen = await setup_skip()
+        s.echo.add("2025년 1월부터 올해 12월까지 확인한 결과예요.")
+        n_tr, n_ss = len(ws.of("transcript")), len(ws.of("speak_start"))
+        s.queue.put_nowait((gen, "다음 문장이에요."))   # 아직 읽을 문장
+        stt.text = "2020년"
+        s.endpointer.in_speech = False
+        s._echo_check = True
+        await s._on_vad(VADEvent("end", pcm=b"\0\0" * 16000, speech_ms=800))
+        assert s.generation == gen and s._echo_task is not None
+        await settle()
+        assert s.generation == gen and s._echo_task is None
+        assert stt.calls == 1 and len(ws.of("transcript")) == n_tr and not ws.of("interrupt")
+        assert len(hermes.calls) == 1
+        # 큐를 비우지 않았으니 다음 문장을 계속 읽는다
+        assert any(m["text"] == "다음 문장이에요." and m["generation"] == gen for m in ws.of("speak_start")[n_ss:])
+        s.speaker_task.cancel()
+    asyncio.run(go())
+
+
+def test_real_speech_during_playback_interrupts_then_turn():
+    async def go():
+        s, ws, stt, hermes, gen = await setup_skip()
+        stt.text = "잠깐만 내일 일정은 어때"
+        s.endpointer.in_speech = False
+        s._echo_check = True
+        await s._on_vad(VADEvent("end", pcm=b"\0\0" * 16000, speech_ms=1400))
+        assert s.generation == gen                     # 판정 전에는 그대로
+        await settle()
+        assert ws.of("interrupt") == [{"type": "interrupt", "generation": gen + 1}]
+        assert ws.of("transcript")[-1]["text"] == stt.text
+        assert s.generation == gen + 2 and len(hermes.calls) == 2 and hermes.calls[-1].endswith(stt.text)
+        s.speaker_task.cancel()
+    asyncio.run(go())
+
+
+def test_speech_resumes_while_echo_judging_carries():
+    async def go():
+        s, ws, stt, hermes, gen = await setup_skip()
+        stt.text = "오늘 서울은"
+        s.endpointer.in_speech = False
+        s._echo_check = True
+        await s._on_vad(VADEvent("end", pcm=b"\1\0" * 8000, speech_ms=500))
+        assert s._echo_task is not None
+        s.endpointer.in_speech = True
+        await s._on_vad(VADEvent("start", barge=True))   # 판정 중 말이 이어짐
+        assert s._echo_task is None and len(s._carry) == 16000 and s._echo_check
+        s.speaker_task.cancel()
+    asyncio.run(go())

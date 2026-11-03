@@ -101,6 +101,16 @@ DUCK_SKIP_LEVEL_DB = float(os.environ.get("DUCK_SKIP_LEVEL_DB", "4.0"))
 DUCK_SKIP_WINDOWS = int(os.environ.get("DUCK_SKIP_WINDOWS", "6"))
 # 생략 뒤 말이 HOLD_CONFIRM_MS 넘게 이어지고 비에코 창이 이만큼 나오면 그때 hold(덕킹 검사)
 DUCK_SKIP_REVOKE_WINDOWS = int(os.environ.get("DUCK_SKIP_REVOKE_WINDOWS", "4"))
+# 덕킹 검사가 에코로 끝난(재생 복귀) 발화의 나머지: 복귀 뒤 마이크가 덕킹 pre 레벨보다 DUCK_ECHO_RISE_DB 이상
+# 높은 구간이 DUCK_ECHO_RISE_MS 이상 이어지지 않았으면 말 끝에서 받아쓰기 없이 버림(이어졌으면 STT + 텍스트 에코 필터)
+DUCK_ECHO_RISE_DB = float(os.environ.get("DUCK_ECHO_RISE_DB", "10"))
+DUCK_ECHO_RISE_MS = int(os.environ.get("DUCK_ECHO_RISE_MS", "300"))
+# 짧은 에코 조각 완화 필터: 재생 중(또는 꼬리) 시작된 발화가 음성 SHORT_ECHO_MS 이하면 STT 결과를 완화 기준으로 한 번 더
+# 거름(숫자·단위만 있는 전사는 최근 문장 숫자와 맞으면 에코). 게이트 에코 비율이 SHORT_ECHO_FRAC 이상이면
+# bigram 완화(SHORT_ECHO_BIGRAM, 최근 2문장)도 씀
+SHORT_ECHO_MS = int(os.environ.get("SHORT_ECHO_MS", "1200"))
+SHORT_ECHO_FRAC = float(os.environ.get("SHORT_ECHO_FRAC", "0.3"))
+SHORT_ECHO_BIGRAM = float(os.environ.get("SHORT_ECHO_BIGRAM", "0.5"))
 # 매 턴 사용자 글 앞에 붙이는 음성용 스타일 노트(빈 문자열이면 끔)
 AGENT_NAME = os.environ.get("AGENT_NAME", "Herbot").strip() or "Herbot"  # 음성 대화 상대 이름(헤더·스타일 노트)
 # 빠름/깊게 라우트에 실제로 붙은 모델의 표시 이름(설정 시트·스타일 노트). 비우면 표시·노트 생략

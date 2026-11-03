@@ -82,6 +82,51 @@ def global_echo_reason(text: str, recent: Iterable[str], min_len: int = GLOBAL_M
     return None
 
 
+_NUM_ONLY = re.compile(r"(?:\d+(?:년|월|일|번|시|분|초|개|명|회|살|세|주|차|층|호|원|도|퍼센트)?)+")
+
+
+def _digit_bigrams(tok: str) -> list[str]:
+    return [tok[i:i + 2] for i in range(len(tok) - 1)]
+
+
+def lenient_echo_reason(text: str, recent: Iterable[str], last_n: int = 2, bigram: Optional[float] = 0.5) -> Optional[str]:
+    """짧은 에코 조각용 완화 기준(재생 중 시작된 짧은 발화에만 쓴다). 최근 last_n문장과 비교.
+
+    1) 숫자·단위만 있는 전사('2020년', '3번 1일'): 숫자 토큰이 모두 최근 문장 숫자에 있거나, 숫자 bigram의
+       절반 이상이 최근 문장 숫자 bigram에 있으면 에코. 실기(17:46): 답의 '2025년'/'20일'을 '2020년'으로 받아씀.
+    2) bigram이 None이 아니면: 최근 문장 부분 문자열이거나 문자 bigram 포함률 ≥ bigram이면 에코."""
+    n = normalize(text)
+    if not n:
+        return None
+    sents = [s for s in (normalize(x) for x in recent) if s][-last_n:] if last_n > 0 else []
+    if not sents:
+        return None
+    joined = "".join(sents)
+    if _NUM_ONLY.fullmatch(n):
+        toks = re.findall(r"\d+", n)
+        have = re.findall(r"\d+", joined)
+        if toks and have:
+            if all(t in have for t in toks):
+                return "숫자 일치(완화)"
+            bg = [b for t in toks for b in _digit_bigrams(t)]
+            hb = {b for t in have for b in _digit_bigrams(t)}
+            if bg and sum(b in hb for b in bg) / len(bg) >= 0.5:
+                return f"숫자 bigram {sum(b in hb for b in bg) / len(bg):.2f}(완화)"
+    if bigram is None or len(n) < MIN_LEN:
+        return None
+    if n in joined:
+        return "부분 문자열(완화)"
+    bg = _bigrams(n)
+    if bg:
+        have = set(_bigrams(joined))
+        for s in sents:
+            have.update(_bigrams(s))
+        frac = sum(b in have for b in bg) / len(bg)
+        if frac >= bigram:
+            return f"bigram {frac:.2f}(완화)"
+    return None
+
+
 def is_echo(text: str, recent: Iterable[str]) -> bool:
     return echo_reason(text, recent) is not None
 
@@ -111,6 +156,9 @@ class EchoMemory:
 
     def reason(self, text: str) -> Optional[str]:
         return echo_reason(text, self.recent())
+
+    def lenient_reason(self, text: str, bigram: Optional[float] = 0.5, last_n: int = 2) -> Optional[str]:
+        return lenient_echo_reason(text, self.recent(), last_n=last_n, bigram=bigram)
 
     def global_reason(self, text: str) -> Optional[str]:
         return global_echo_reason(text, self.recent())

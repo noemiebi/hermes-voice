@@ -121,6 +121,13 @@ class VoiceSession:
         self._mic_hist: list[tuple[float, float]] = []  # (시각, 창 평균 제곱) 최근 3초
         self._duck: Optional[dict] = None  # 진행 중인 덕킹 검사 {"at", "pre_db"}
         self._duck_skip: Optional[dict] = None  # 확실한 에코로 덕킹을 생략한 발화 {"at", "nonecho"}
+        # 덕킹 검사가 에코로 확정돼 재생 복귀한 발화 {"at", "gen", "pre_db", "rechecked", "run", "gap", "best"}
+        # (run/best: 복귀 뒤 pre + DUCK_ECHO_RISE_DB 이상인 창 연속 수/최대, gap: 연속 중 빈 창 수)
+        self._duck_echo: Optional[dict] = None
+        self._stale_play = -1e9           # 옛 generation(이미 끝낸 턴)의 speaking 보고 마지막 시각: 클라이언트가 아직 재생 중
+        self._stale_floor = 0             # 이 generation 미만 보고는 무시(interrupt로 클라이언트가 이미 버린 재생)
+        self._echo_task: Optional[asyncio.Task] = None  # 재생 중 끝난 에코 검사 대상 발화의 받아쓰기 판정
+        self._echo_pcm = b""
         self.style_note = config.VOICE_STYLE_NOTE
 
     # ---------- 송신 ----------
@@ -203,6 +210,7 @@ class VoiceSession:
                     await self._on_text(msg["text"])
         finally:
             self._closed = True
+            self._cancel_echo_task()
             await self._cancel_turn()
             if self.speaker_task:
                 self.speaker_task.cancel()
@@ -218,6 +226,7 @@ class VoiceSession:
                 await self._on_vad(ev)
             if self.holding and self._duck is not None:
                 await self._check_duck()
+            await self._check_duck_echo()
             if (self.holding and self._hold_task is None and self.endpointer.in_speech
                     and self._confirm_ms() - self._hold_base_ms >= self.hold_confirm_ms):
                 await self._confirm_hold()
@@ -235,13 +244,49 @@ class VoiceSession:
         n = (a.size + 511) // 512
         for k in range(n):
             w = a[k * 512:(k + 1) * 512]
-            self._mic_hist.append((now - (n - 1 - k) * 0.032, float(np.mean(w * w))))
+            t, pw = now - (n - 1 - k) * 0.032, float(np.mean(w * w))
+            self._mic_hist.append((t, pw))
+            self._track_duck_echo(t, pw)
         cut = now - 3.0
         i = 0
         while i < len(self._mic_hist) and self._mic_hist[i][0] < cut:
             i += 1
         if i:
             del self._mic_hist[:i]
+
+    def _track_duck_echo(self, t: float, pw: float) -> None:
+        """덕킹 에코 확정 뒤 마이크가 pre + DUCK_ECHO_RISE_DB 이상인 창의 최장 연속(빈 창 1개 허용)을 잰다."""
+        d = self._duck_echo
+        if d is None or t < d["at"]:
+            return
+        if 10 * np.log10(max(pw, 1e-18)) >= d["pre_db"] + config.DUCK_ECHO_RISE_DB:
+            d["run"] += 1 + d["gap"]
+            d["gap"] = 0
+            d["best"] = max(d["best"], d["run"])
+        elif d["run"] and d["gap"] == 0:
+            d["gap"] = 1
+        else:
+            d["run"], d["gap"] = 0, 0
+
+    def _duck_echo_rise_ms(self) -> float:
+        d = self._duck_echo
+        return 0.0 if d is None else d["best"] * 32.0
+
+    async def _check_duck_echo(self) -> None:
+        """덕킹 에코로 복귀한 발화가 복귀 뒤 HOLD_CONFIRM_MS 넘게 이어지면 덕킹 검사를 한 번 더(_hold).
+        사용자 말이면 끼어들기 확정, 에코면 표시 유지."""
+        d = self._duck_echo
+        if d is None or d["rechecked"] or self.holding:
+            return
+        ep = self.endpointer
+        if ep is None or not ep.in_speech or d["gen"] != self.generation or not self._playing():
+            return
+        if self.clock() - d["at"] >= self.hold_confirm_ms / 1000:
+            d["rechecked"] = True
+            log.info("덕킹 에코 뒤 말이 %d ms 넘게 이어짐 (복귀 뒤 상승 %.0f ms) -> 덕킹 재검사",
+                     self.hold_confirm_ms, self._duck_echo_rise_ms())
+            await self._hold()
+            await self.set_state("listening")
 
     def _mic_db_between(self, t0: float, t1: float) -> Optional[float]:
         xs = [p for t, p in self._mic_hist if t0 <= t <= t1]
@@ -295,7 +340,12 @@ class VoiceSession:
         if verdict == "echo":
             log.info("덕킹 검사(%s): pre %.1f dB -> %.1f dB (%.1f dB 하강, hold 뒤 %.0f ms) -> 에코, 재생 복귀",
                      how, pre, val, pre - val, took)
+            prev = self._duck_echo
+            gen = self._hold_gen
             await self._resume()
+            # 이 발화의 나머지는 에코로 표시: 말 끝에서 복귀 뒤 레벨 상승이 없으면 받아쓰지 않고 버린다
+            self._duck_echo = {"at": self.clock(), "gen": gen, "pre_db": pre,
+                               "rechecked": bool(prev and prev.get("rechecked")), "run": 0, "gap": 0, "best": 0}
         else:
             log.info("덕킹 검사(%s): pre %.1f dB -> %.1f dB (%.1f dB 하강, hold 뒤 %.0f ms) -> 사용자 말, 끼어들기 확정",
                      how, pre, val, pre - val, took)
@@ -432,6 +482,10 @@ class VoiceSession:
             return self.clock() - self._last_report < config.PLAYBACK_REPORT_TIMEOUT_S
         return self.clock() < self._play_until + PLAYBACK_GRACE_S
 
+    def _stale_playing(self) -> bool:
+        """옛 generation 오디오가 클라이언트에서 아직 재생 중(최근 PLAYBACK_REPORT_TIMEOUT_S 안 speaking 보고)."""
+        return self.clock() - self._stale_play < config.PLAYBACK_REPORT_TIMEOUT_S
+
     def _est_play_end(self, gen: int) -> float:
         """방금 참조에 붙인 문장까지 다 들리는 추정 시각. pos_ms 시간축이 있으면 그걸로, 없으면 _play_until."""
         now = self.clock()
@@ -493,8 +547,21 @@ class VoiceSession:
         if ev.kind == "start":
             self._speech_wall = time.perf_counter()
             # 재생 중이거나 재생이 막 끝난 뒤 시작된 말은 받아쓴 뒤 에코인지 본다
-            self._echo_check = self._playing() or self.clock() < self._tail_until
+            self._echo_check = self._playing() or self.clock() < self._tail_until or self._stale_playing()
             self._duck_skip = None
+            self._duck_echo = None
+            if self._echo_task is not None:
+                # 에코 판정(받아쓰기) 중 말이 다시 시작: 그 발화를 새 발화 앞에 붙이고 에코 검사 유지
+                task, self._echo_task = self._echo_task, None
+                if not task.done():
+                    task.cancel()
+                    try:
+                        await task
+                    except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                        pass
+                    self._carry = self._echo_pcm
+                    self._echo_check = True
+                    log.info("에코 판정 중 말 이어짐: 앞 발화 %.1f s 붙임", len(self._carry) / 32000)
             if self.holding:
                 # 잠정 끼어들기 판정 중 말이 다시 시작: 받아쓰던 발화를 붙이고 hold 유지
                 if self._hold_task and not self._hold_task.done():
@@ -540,6 +607,7 @@ class VoiceSession:
                 await self.set_state("listening")
         elif ev.kind in ("end", "discard"):
             self._duck_skip = None
+            duck_echo, self._duck_echo = self._duck_echo, None
             await self.send_json({"type": "vad", "speech": False})
             carry, self._carry = self._carry, b""
             pcm = carry + ev.pcm
@@ -563,11 +631,36 @@ class VoiceSession:
             log.info("말 끝 (음성 %d ms, 끝 침묵 %d ms, 발화 %.2f s%s)", ev.speech_ms, ev.end_lag_ms,
                      len(pcm) / 32000, f", smart-turn {ev.smart}" if ev.smart else "")
             echo_check, self._echo_check = self._echo_check, False
+            if duck_echo is not None and duck_echo["gen"] == self.generation:
+                rise = duck_echo["best"] * 32.0
+                if rise < config.DUCK_ECHO_RISE_MS:
+                    log.info("에코 무시(덕킹 확정): 음성 %d ms (복귀 뒤 pre %.1f dB + %.0f dB 넘는 구간 %.0f ms)",
+                             ev.speech_ms, duck_echo["pre_db"], config.DUCK_ECHO_RISE_DB, rise)
+                    await self.set_state("speaking" if self._playing() else self.rest_state())
+                    return
+                log.info("덕킹 에코 뒤 레벨 상승 %.0f ms (pre %.1f dB + %.0f dB 초과) -> 받아써서 텍스트 에코 필터로",
+                         rise, duck_echo["pre_db"], config.DUCK_ECHO_RISE_DB)
+                echo_check = True
             if echo_check and self._gate_echo(ev):
                 log.info("에코 무시(대조): %s (음성 %d ms)", self._gate_desc(ev), ev.speech_ms)
                 await self.set_state("speaking" if self._playing() else self.rest_state())
                 return
-            self._start_turn(pcm=pcm, echo_check=echo_check)
+            short_echo = None
+            if echo_check and ev.speech_ms <= config.SHORT_ECHO_MS:
+                short_echo = ev.echo_frac if ev.echo_judged else 0.0
+            if echo_check and (self._playing() or self._stale_playing() or not self.queue.empty()
+                               or self._turn_running()):
+                # 답이 진행 중(재생·옛 재생·보낼 문장·생각 중): STT 판정 전에는 generation·큐를 건드리지 않는다.
+                # 실기(17:46): 에코 발화가 새 턴을 열어 답이 끊겼고, 클라이언트는 옛 답을 계속 재생했다.
+                log.info("에코 검사 대상 발화 -> 재생 유지하고 받아써서 판정 (음성 %d ms)", ev.speech_ms)
+                self._cancel_echo_task()
+                self._echo_pcm = pcm
+                self._echo_task = asyncio.create_task(
+                    self._resolve_pending("echo", self.generation, pcm, short_echo))
+                await self.set_state("speaking" if (self._playing() or not self.queue.empty())
+                                     else ("thinking" if self._turn_running() else self.rest_state()))
+                return
+            self._start_turn(pcm=pcm, echo_check=echo_check, short_echo=short_echo)
 
     # ---------- 잠정 끼어들기(hold/resume) ----------
     async def _hold(self) -> None:
@@ -629,35 +722,84 @@ class VoiceSession:
         log.info("hold: 말이 %d ms 넘게 이어짐 -> 끼어들기 확정", self.hold_confirm_ms)
         await self.interrupt(announce=False, notify=True)
 
-    async def _resolve_hold(self, gen: int, pcm: bytes) -> None:
-        """hold 중 끝난 발화를 받아써서 에코·빈 결과면 resume, 진짜 말이면 끼어들기 + 새 턴."""
+    def _echo_filter(self, text: str, echo_check: bool, short_echo: Optional[float] = None
+                     ) -> Optional[tuple[str, str]]:
+        """받아쓴 문장 텍스트 에코 필터. 에코면 (로그 머리, 근거), 아니면 None.
+        echo_check: 최근 문장 비교(echo.reason). short_echo: 짧은 조각 완화 기준(게이트 에코 비율, None이면 안 씀).
+        전역 규칙(길고 거의 같은 문장)은 항상."""
+        if not text:
+            return None
+        if echo_check:
+            reason = self.echo.reason(text)
+            if reason:
+                return "에코 무시", reason
+        if short_echo is not None:
+            big = config.SHORT_ECHO_BIGRAM if short_echo >= config.SHORT_ECHO_FRAC else None
+            lreason = self.echo.lenient_reason(text, bigram=big)
+            if lreason:
+                return "에코 무시(짧은 조각)", f"{lreason}, 게이트 에코 비율 {short_echo:.2f}"
+        greason = self.echo.global_reason(text)
+        if greason:  # 재생 꼬리와 무관: 길고 거의 같은 문장
+            return "에코 무시(전역)", greason
+        return None
+
+    async def _resolve_pending(self, kind: str, gen: int, pcm: bytes, short_echo: Optional[float] = None) -> None:
+        """재생을 그대로 둔 채 끝난 발화를 받아써서 판정(공용). 에코·빈 결과면 재생 계속, 진짜 말이면
+        그때 interrupt(옛 답 끊기·끊긴 답 노트) + 그 텍스트로 새 턴.
+        kind="hold": hold 중 끝난 발화(에코면 resume). kind="echo": 재생 중 끝난 에코 검사 대상 발화
+        (generation·큐를 건드리지 않고 판정, 에코면 재생 계속)."""
+        hold = kind == "hold"
+
+        def valid() -> bool:
+            return gen == self.generation and (self.holding if hold else self._echo_task is not None)
+
+        async def keep_playing() -> None:
+            if hold:
+                self._hold_task = None
+                await self._resume()
+            else:
+                self._echo_task = None
+                await self.set_state("speaking" if (self._playing() or not self.queue.empty())
+                                     else ("thinking" if self._turn_running() else self.rest_state()))
         try:
-            await self.set_state("transcribing")
+            if hold:
+                await self.set_state("transcribing")
             text, ms = ("", 0)
             if self.stt.loaded:
                 text, ms = await self.stt.transcribe(pcm)
-            if not self.holding or gen != self.generation:
+            if not valid():
                 return
-            reason = self.echo.reason(text) if text else None
-            if not text or reason:
+            filt = self._echo_filter(text, True, short_echo)
+            if not text or filt:
                 if text:
-                    log.info("에코 무시: %r (%s, STT %d ms)", text, reason, ms)
+                    log.info("%s: %r (%s, STT %d ms)%s", filt[0], text, filt[1], ms,
+                             "" if hold else " -> 재생 계속")
                 else:
-                    log.info("hold: 받아쓰기 비어 재생 재개 (STT %d ms)", ms)
-                self._hold_task = None
-                await self._resume()
+                    log.info("%s: 받아쓰기 비어 재생 계속 (STT %d ms)", kind, ms)
+                await keep_playing()
                 return
-            log.info("hold: 진짜 말 %r (STT %d ms) -> 끼어들기", text, ms)
-            self._hold_task = None
+            log.info("%s: 진짜 말 %r (STT %d ms) -> 끼어들기", kind, text, ms)
+            if hold:
+                self._hold_task = None
+            else:
+                self._echo_task = None
             await self.interrupt(announce=False, notify=True)
             await self.send_json({"type": "transcript", "text": text, "ms": ms})
             self._start_turn(text=text)
         except asyncio.CancelledError:
             raise
         except Exception:  # noqa: BLE001
-            log.exception("hold 판정 실패 -> 재생 재개")
-            self._hold_task = None
-            await self._resume()
+            log.exception("%s 판정 실패 -> 재생 계속", kind)
+            await keep_playing()
+
+    async def _resolve_hold(self, gen: int, pcm: bytes) -> None:
+        """hold 중 끝난 발화를 받아써서 에코·빈 결과면 resume, 진짜 말이면 끼어들기 + 새 턴."""
+        await self._resolve_pending("hold", gen, pcm)
+
+    def _cancel_echo_task(self) -> None:
+        task, self._echo_task = self._echo_task, None
+        if task and not task.done() and task is not asyncio.current_task():
+            task.cancel()
 
     async def _on_text(self, raw: str) -> None:
         try:
@@ -723,6 +865,12 @@ class VoiceSession:
             lat = float(lat) if isinstance(lat, (int, float)) and not isinstance(lat, bool) and 0 <= lat < 1000 else 0.0
             if pos is not None:
                 pos -= lat  # 스피커에서 실제로 나오는 위치(출력 지연만큼 뒤)
+            if st == "speaking" and self._stale_floor <= g < self.generation:
+                # 끼어들기 없이 턴이 바뀌었는데(말 끝 -> 새 턴) 클라이언트가 옛 답을 아직 재생 중: 에코 검사 대상
+                self._stale_play = self.clock()
+            elif st == "idle" and g < self.generation and self._stale_playing():
+                self._stale_play = -1e9
+                self._tail_until = max(self._tail_until, self.clock() + self.echo_tail_s)
             if st == "speaking" and g == self.generation:
                 self.playback, self.playback_gen = "speaking", g
                 if pos is not None:
@@ -809,7 +957,11 @@ class VoiceSession:
     async def interrupt(self, announce: bool = True, notify: bool = False) -> None:
         self._note_cut_answer()
         self._clear_hold()
+        self._cancel_echo_task()
+        self._duck_echo = None
+        self._stale_play = -1e9  # 클라이언트에 interrupt를 보내 옛 재생을 버림
         self.generation += 1
+        self._stale_floor = self.generation
         self._drain_queue()
         await self._cancel_turn()  # 헤르메스 스트림 연결이 닫힘 -> 서버가 run 중단
         self.listening = False
@@ -822,15 +974,21 @@ class VoiceSession:
 
     # ---------- 턴 ----------
     def _start_turn(self, pcm: Optional[bytes] = None, text: Optional[str] = None,
-                    echo_check: bool = False) -> None:
+                    echo_check: bool = False, short_echo: Optional[float] = None) -> None:
         self._clear_hold()
+        self._cancel_echo_task()
+        self._duck_echo = None
         self.generation += 1
         self._drain_queue()
         self._turn_pcm = pcm or b""
         self._turn_echo = echo_check
-        self.turn_task = asyncio.create_task(self._turn(self.generation, pcm, text, echo_check))
+        self.turn_task = asyncio.create_task(self._turn(self.generation, pcm, text, echo_check, short_echo))
 
-    async def _turn(self, gen: int, pcm: Optional[bytes], text: Optional[str], echo_check: bool = False) -> None:
+    async def _turn(self, gen: int, pcm: Optional[bytes], text: Optional[str], echo_check: bool = False,
+                    short_echo: Optional[float] = None) -> None:
+        """short_echo: 재생 중 시작된 짧은 발화(음성 ≤ SHORT_ECHO_MS)의 게이트 에코 비율. None이 아니면 STT 결과를
+        완화 기준(echo.lenient_reason)으로 한 번 더 거른다: 숫자·단위만 있는 전사는 항상, bigram 완화는 비율 ≥
+        SHORT_ECHO_FRAC일 때만."""
         t0 = time.perf_counter()
         try:
             if text is None:
@@ -842,14 +1000,9 @@ class VoiceSession:
                 text, ms = await self.stt.transcribe(pcm or b"")
                 if gen != self.generation:
                     return
-                reason = self.echo.reason(text) if (text and echo_check) else None
-                if reason:
-                    log.info("에코 무시: %r (%s, STT %d ms)", text, reason, ms)
-                    await self.set_state(self.rest_state())
-                    return
-                greason = self.echo.global_reason(text) if text else None
-                if greason:  # 재생 꼬리와 무관: 길고 거의 같은 문장
-                    log.info("에코 무시(전역): %r (%s, STT %d ms)", text, greason, ms)
+                filt = self._echo_filter(text, echo_check, short_echo)
+                if filt:
+                    log.info("%s: %r (%s, STT %d ms)", filt[0], text, filt[1], ms)
                     await self.set_state(self.rest_state())
                     return
                 await self.send_json({"type": "transcript", "text": text, "ms": ms})

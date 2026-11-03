@@ -68,3 +68,17 @@ def test_global_rule_long_similar_only():
     assert global_echo_reason("더 들어보시겠어요", recent) is None
     # 길지만 다른 말
     assert global_echo_reason("아니 그건 됐고 내일 아침 일정 좀 알려 줄래", recent) is None
+
+
+def test_lenient_numeric_fragments():
+    from server.echo import lenient_echo_reason
+    recent = ["당직은 총 9개예요.", "6월에 3번(1일, 18일, 25일), 7월에 3번(2일, 14일, 20일)이에요.",
+              "2025년 1월부터 올해 12월까지 확인한 결과고, 9월 이후로는 당직이 없어요."]
+    assert lenient_echo_reason("2020년", recent)
+    assert lenient_echo_reason("3번", recent)
+    assert lenient_echo_reason("2025년 1월", recent)
+    assert not lenient_echo_reason("1999년", recent)
+    assert not lenient_echo_reason("잠깐만", recent)
+    assert not lenient_echo_reason("9개", recent[:1] + ["다른 말이에요.", "숫자 없는 문장이에요."])  # 최근 2문장만
+    assert lenient_echo_reason("올해 12월 결과가 이후로", recent, bigram=0.5)
+    assert not lenient_echo_reason("올해 12월 결과가 이후로", recent, bigram=None)

@@ -348,3 +348,19 @@ def test_level_rule_outside_onset():
     user = voiced_scale(speechlike(6.0, SR, seed=99), -30)[: echo.size]
     rs = run(echo + user + noise_floor(echo.size, db=-68))
     assert sum(r.echo for r in rs) / len(rs) <= 0.2, sum(r.echo for r in rs) / len(rs)
+
+
+def test_digital_silence_keeps_learned_lag():
+    """iOS가 재생 중 마이크를 완전 무음(0)으로 보내는 구간(실기 17:46, 입력 -180 dBFS)이 학습한 lag 점수를 지우지 않는다.
+    예전에는 무음 창마다 상관 0이 EMA로 섞여 lag 점수가 사라지고, 에코가 다시 들어올 때 lag가 412 -> -100 ms로 튀었다."""
+    ref44 = make_ref(sec=10.0, seed=5)
+    ref16 = resample_44k_to_16k(ref44)
+    mic = echo_of(ref16, delay_ms=200) + noise_floor(ref16.size)
+    mic[int(4 * SR):int(7 * SR)] = 0.0             # 3초 디지털 무음
+    gate = EchoGate()
+    rs = run_gate(mic, ref44, gate=gate)
+    k_silence_end = int(7 * SR) // WINDOW
+    after = [r for r in rs[k_silence_end:k_silence_end + 30] if r.corr > 0]
+    assert after
+    assert all(abs(r.lag_ms - 200) <= 48 for r in after), [r.lag_ms for r in after]
+    assert abs(gate.lag_est_ms - 200) <= 60, gate.lag_est_ms
