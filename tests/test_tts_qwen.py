@@ -215,6 +215,45 @@ def test_router_supertonic_engine_ignores_qwen():
     assert r.engine == "supertonic" and len(out) == 1 and r.fallbacks == 0
 
 
+class MissingSupertonic(FakeSupertonic):
+    """모델 폴더가 없어 로드 실패한 Supertonic(server/tts.py TTSEngine.load_sync와 같은 상태)."""
+    loaded = False
+    error = "Supertonic 모델 폴더 없음: /nonexistent"
+
+    async def synth(self, text, is_current=lambda: True):
+        self.calls.append(text)
+        raise AssertionError("TTS not loaded")
+
+
+def test_router_without_supertonic_waits_for_qwen(tmp_path):
+    async def main():
+        eng, _ = make_engine(tmp_path)
+        st = MissingSupertonic()
+        r = TTSRouter(st, eng, engine="qwen", first_chunk_timeout_s=0.3, first_chunk_max_s=0.3)
+        await r.load()
+        loaded = r.loaded
+        slow = [c async for c in r.synth_stream("SLOW 느린 문장", turn_id=1)]   # 첫 청크 2초 > 한도 0.3초
+        err = [c async for c in r.synth_stream("ERR", turn_id=1)]              # 폴백 불가 -> 건너뜀
+        ok = [c async for c in r.synth_stream("정상", turn_id=1)]               # 같은 답이어도 Qwen 계속
+        await r.aclose()
+        return r, st, loaded, slow, err, ok
+    r, st, loaded, slow, err, ok = run(main())
+    assert loaded                       # Supertonic 없어도 Qwen ready면 /health ok
+    assert len(slow) >= 3 and r.last_engine == "qwen"
+    assert err == [] and len(ok) >= 3
+    assert st.calls == [] and r.fallbacks == 0
+
+
+def test_tts_engine_missing_model_dir_does_not_raise(tmp_path):
+    from server.tts import TTSEngine
+    async def main():
+        e = TTSEngine(model_dir=str(tmp_path / "없음"))
+        await e.load()
+        return e
+    e = run(main())
+    assert not e.loaded and "모델 폴더 없음" in e.error
+
+
 # ---------------------------------------------------------------- 세션 스트리밍 경로
 async def make_session(tmp_path, timeout=2.5):
     eng, log = make_engine(tmp_path)

@@ -5,6 +5,12 @@
 #   .venv-tts/bin/hf download mlx-community/Qwen3-TTS-12Hz-1.7B-CustomVoice-8bit
 #   (다른 위치면 HF_HOME=<경로> 를 앞에 붙이고, .env 에 QWEN_TTS_HF_HOME=<경로>)
 set -e
+if [[ "$(uname -sm)" != "Darwin arm64" ]]; then
+  echo "오류: Apple Silicon 맥(MLX)에서만 돕니다. 다른 환경이면 .env에 TTS_ENGINE=supertonic" >&2; exit 1
+fi
+if ! command -v uv >/dev/null 2>&1; then
+  echo "오류: uv가 필요합니다(https://docs.astral.sh/uv/, 예: brew install uv)" >&2; exit 1
+fi
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 VENV=$ROOT/.venv-tts
 if [[ "$1" == "--force" ]]; then rm -rf "$VENV"; fi
@@ -15,4 +21,5 @@ fi
 uv pip install --python "$VENV/bin/python" \
   "mlx-audio==0.6.3" "mlx==0.32.4" "transformers==5.22.1" "huggingface-hub==2.4.0" "numpy" "scipy"
 "$VENV/bin/python" -c "import mlx_audio, mlx.core as mx; print('mlx-audio', mlx_audio.__version__ if hasattr(mlx_audio, '__version__') else '?', 'mlx', mx.__version__)"
-echo "완료: $VENV (켜기: .env에 TTS_ENGINE=qwen)"
+echo "완료: $VENV (TTS_ENGINE 기본이 qwen이라 따로 켤 필요 없음)"
+echo "다음: 모델 받기  $VENV/bin/hf download mlx-community/Qwen3-TTS-12Hz-1.7B-CustomVoice-8bit"

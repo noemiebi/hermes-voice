@@ -59,8 +59,9 @@ TTS_PROVIDER = os.environ.get("TTS_PROVIDER", "cpu").lower()  # cpu | coreml
 # 합성 결과 라우드니스 정규화: 음성 구간(-40 dBFS 넘는 32 ms 프레임) RMS를 이 값으로, 피크는 TTS_PEAK_DB 이하.
 TTS_TARGET_RMS_DB = float(os.environ.get("TTS_TARGET_RMS_DB", "-18"))
 TTS_PEAK_DB = float(os.environ.get("TTS_PEAK_DB", "-1"))
-# TTS 엔진: supertonic(기본) | qwen(Qwen3-TTS 스트리밍, 별도 venv 워커. 실패·지연 시 문장 단위로 Supertonic 폴백)
-TTS_ENGINE = os.environ.get("TTS_ENGINE", "supertonic").strip().lower()
+# TTS 엔진: qwen(기본, Qwen3-TTS 스트리밍, 별도 venv 워커. 실패·지연 시 문장 단위로 Supertonic 폴백,
+# Supertonic 모델이 없으면 폴백 없이 Qwen을 기다림) | supertonic(가벼운 대안: 메모리 적고 로드 빠름)
+TTS_ENGINE = os.environ.get("TTS_ENGINE", "qwen").strip().lower()
 QWEN_TTS_MODEL = os.environ.get("QWEN_TTS_MODEL", "mlx-community/Qwen3-TTS-12Hz-1.7B-CustomVoice-8bit")
 QWEN_TTS_VOICE = os.environ.get("QWEN_TTS_VOICE", "Sohee")
 QWEN_TTS_PYTHON = os.environ.get("QWEN_TTS_PYTHON", str(ROOT / ".venv-tts" / "bin" / "python"))

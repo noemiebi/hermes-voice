@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import Callable, Optional
@@ -100,6 +101,10 @@ class TTSEngine:
 
     def load_sync(self) -> None:
         t = time.perf_counter()
+        if not os.path.isdir(self.model_dir):   # 모델을 안 받은 경우: 트레이스백 없이 경고 한 줄
+            self.error = f"Supertonic 모델 폴더 없음: {self.model_dir}"
+            log.warning("TTS(Supertonic) 로드 안 함: %s", self.error)
+            return
         try:
             self.tts = build_tts(self.model_dir, self.provider)
             self.style = load_voice_style([self.voice])

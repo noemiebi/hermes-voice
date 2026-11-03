@@ -434,6 +434,8 @@ class TTSRouter:
 
     qwen: Qwen 워커가 준비 안 됐거나, 첫 청크가 first_chunk_timeout_s 안에 안 오거나, 첫 청크 전에 오류가 나면
     그 문장은 Supertonic으로 폴백(WARNING). 첫 청크 뒤 오류는 그 문장을 거기서 끝낸다(이미 일부를 보냄).
+    Supertonic이 로드되지 않았으면(모델 없음 등) 폴백할 곳이 없으므로 첫 청크를 한도 없이 기다린다
+    (문장을 버리지 않음). Qwen이 준비 안 됐거나 첫 청크 전 오류가 나면 그 문장은 소리 없이 건너뛴다.
 
     첫 청크 대기 한도 = max(first_chunk_timeout_s, min(lead_s - lead_margin_s, first_chunk_max_s)).
     lead_s는 호출자가 추정한 '앞 문장 오디오가 클라이언트에서 다 재생되기까지 남은 초'(모르면 0):
@@ -479,7 +481,20 @@ class TTSRouter:
         jobs = [self.supertonic.load()]
         if self.engine == "qwen" and self.qwen is not None:
             jobs.append(self.qwen.start())
-        await asyncio.gather(*jobs)
+        results = await asyncio.gather(*jobs, return_exceptions=True)
+        if isinstance(results[0], BaseException):   # Supertonic 로드 실패는 기동을 막지 않는다
+            if getattr(self.supertonic, "error", None) is None:
+                try:
+                    self.supertonic.error = repr(results[0])
+                except Exception:  # noqa: BLE001
+                    pass
+        if self.engine == "qwen" and not self.supertonic.loaded:
+            log.warning("Supertonic 로드 실패(폴백 없이 Qwen만 사용): %s", getattr(self.supertonic, "error", None))
+        for r in results[1:]:
+            if isinstance(r, BaseException):
+                raise r
+        if self.engine != "qwen" and isinstance(results[0], BaseException):
+            raise results[0]
 
     async def synth(self, text: str, is_current: Callable[[], bool] = lambda: True,
                     lead_s: float = 0.0, turn_id=None):
@@ -510,10 +525,13 @@ class TTSRouter:
             log.info("같은 답이라 Supertonic 유지: %s", text[:40])
         elif self.engine == "qwen":
             reason = None
-            limit = self.first_chunk_limit(lead_s)
+            can_fallback = bool(self.supertonic.loaded)
+            limit = self.first_chunk_limit(lead_s) if can_fallback else None
             if self.qwen is None or not self.qwen.ready:
                 reason = f"준비 안 됨: {self.qwen.error if self.qwen else '없음'}"
             else:
+                if not can_fallback:
+                    log.info("Supertonic 없음: Qwen 대기: %s", text[:40])
                 agen = self.qwen.synth_stream(text, is_current)
                 try:
                     first = await asyncio.wait_for(agen.__anext__(), limit)
@@ -543,6 +561,9 @@ class TTSRouter:
                 if reason is None:      # 합성 중 이 generation이 끝남
                     return
             if not is_current():
+                return
+            if not can_fallback:
+                log.warning("Qwen TTS 실패, Supertonic 없음 -> 이 문장 건너뜀 (%s): %s", reason, text[:40])
                 return
             self._note_fallback(reason, text, turn_id)
         res = await self.supertonic.synth(text, is_current)
