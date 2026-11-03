@@ -177,6 +177,8 @@ svg { display: block; flex: none; }
   align-items: center;
   gap: 4px;
 }
+/* 마이크 준비 중(탭 직후~첫 마이크 프레임): 대화 전 색과 대기 색의 중간 */
+.dock[data-state="starting"] { --c: color-mix(in srgb, var(--st-idle), var(--st-wait)); }
 .dock[data-state="waiting"] { --c: var(--st-wait); }
 .dock[data-state="listening"] { --c: var(--st-listen); }
 .dock[data-state="transcribing"], .dock[data-state="thinking"] { --c: var(--st-busy); }
@@ -283,6 +285,7 @@ svg { display: block; flex: none; }
   transition: color var(--dur) var(--ease);
 }
 .status.waiting { color: var(--st-wait); }
+.status.starting { color: color-mix(in srgb, var(--text-2), var(--st-wait)); }
 .status.listening { color: var(--st-listen); }
 .status.transcribing, .status.thinking { color: var(--st-think); }
 .status.speaking { color: var(--st-speak); }

@@ -4,7 +4,7 @@
 //   끄려면 Safari 콘솔(또는 웹 검사기)에서 localStorage.setItem('hv.keepalive', '0') 후 새로 고침. 다시 켜려면 removeItem.
 'use strict';
 
-const APP_VERSION = '0.6.3';
+const APP_VERSION = '0.6.4';
 const AGENT_NAME_DEFAULT = 'Herbot'; // 서버 ready의 agent_name이 오면 그걸 쓴다
 const KEEPALIVE_LEVEL = 1e-5; // 약 -100 dBFS
 const DIAG_BUF_MAX = 20; // WS가 닫힌 동안 모아 둘 진단 줄 수
@@ -88,6 +88,7 @@ const st = {
   // 핸즈프리
   conv: false, // conversation on 상태(끝낼 때까지 PCM 계속 전송)
   convStarting: false, // 마이크 준비 중
+  readyWait: null, // 탭 뒤 첫 마이크 프레임 대기 { tapAt, frameAt, timer }
   convPaused: false, // 백그라운드로 가서 꺼짐 → "다시 시작" 안내
   vadSpeech: false, // 서버 vad 이벤트
   // 무음(저장하지 않음, 대화를 새로 시작하면 해제)
@@ -299,6 +300,7 @@ function playing() {
 
 function displayState() {
   if (st.listening) return 'listening';
+  if (st.convStarting || (st.conv && st.readyWait)) return 'starting';
   if (playing()) return 'speaking';
   const s = st.serverState || 'idle';
   if (st.conv) {
@@ -331,7 +333,7 @@ function trackTurn(s) {
 function statusText(s) {
   if (st.authFail) return '접속 토큰이 필요합니다';
   if (st.micNote) return st.micNote;
-  if (st.convStarting) return '마이크 준비 중';
+  if (s === 'starting') return '마이크 준비 중…';
   if (s === 'idle' && st.convPaused && !st.ptt && !st.conv) return '탭해서 다시 시작';
   if (s === 'listening' && st.ptt && st.toggleMode) return '듣는 중 · 다시 누르면 끝';
   if (s === 'speaking') return '말하는 중';
@@ -670,7 +672,11 @@ function earcon(kind) {
   if (!st.earcon || st.soundOff || !st.ctx || st.ctx.state !== 'running') return;
   ensureOutput(st.ctx);
   const at = st.ctx.currentTime + 0.01;
-  if (kind === 'heard') {
+  if (kind === 'ready') {
+    // "준비됐어요": 523 → 784 Hz(도→솔), 각 45ms. 'heard'보다 낮게 시작해 더 크게 오른다.
+    tone(523, at, 0.045, 0.07);
+    tone(784, at + 0.05, 0.045, 0.07);
+  } else if (kind === 'heard') {
     // "들었어요": 660 → 880 Hz, 각 60ms
     tone(660, at, 0.06, 0.08);
     tone(880, at + 0.065, 0.06, 0.08);
@@ -1594,6 +1600,7 @@ function onCaptureMsg(m) {
   } else if (m.type === 'level') {
     const now = performance.now();
     st.lastLevelAt = now;
+    if (st.readyWait && !st.readyWait.frameAt) { st.readyWait.frameAt = now; checkReady(); }
     st.diagSq += m.rms * m.rms;
     st.diagN++;
     if (playing()) st.lastPlayAt = now;
@@ -1810,6 +1817,8 @@ async function startConversation(why = '') {
   // captureReady()만 true로 남아 프레임이 0개가 되는 경로를 없앤다.
   if (!st.micReady) disconnectCapture();
   dropPrebuf(); // 탭 이전 프레임은 보내지 않는다(새 캡처 그래프부터 보관)
+  clearReadyWait();
+  if (tap) st.readyWait = { tapAt, frameAt: 0, timer: 0 };
   render();
   try {
     await ensureMic();
@@ -1822,6 +1831,7 @@ async function startConversation(why = '') {
     }
   } catch (err) {
     st.convStarting = false;
+    clearReadyWait();
     diag(`[conv] 시작 실패 ${err && err.name} ${err && err.message}`, 'warn');
     toast(micErrorText(err), 7000);
     addLine('sys err', micErrorText(err));
@@ -1830,7 +1840,7 @@ async function startConversation(why = '') {
   }
   st.convStarting = false;
   if (seq !== st.convSeq) return;
-  if (!st.capture) { render(); return; }
+  if (!st.capture) { clearReadyWait(); render(); return; }
   st.conv = true;
   st.convStartAt = performance.now();
   st.vadSpeech = false;
@@ -1848,7 +1858,36 @@ async function startConversation(why = '') {
   startDiag();
   diag(`[conv] 켜짐, ${micDesc()}`);
   addLine('sys', '대화를 시작했어요. 그냥 말씀하세요.');
+  if (st.readyWait) {
+    // 프레임이 끝내 안 오면 준비 표시를 3초 뒤 거둔다(무음·무프레임 복구는 전송 감시가 맡음)
+    st.readyWait.timer = setTimeout(() => {
+      if (!st.readyWait) return;
+      diag('[conv] 준비 완료 미확인(3초 안에 마이크 프레임 없음)', 'warn');
+      clearReadyWait();
+      render();
+    }, 3000);
+    checkReady();
+  }
   render();
+}
+
+// 첫 대화는 탭 뒤 getUserMedia(권한 창 포함)까지 0.8초 넘게 걸려, 그 사이 말하면 남지 않는다.
+// 탭→첫 마이크 프레임이 READY_EARCON_MS를 넘으면 준비 완료 때 짧은 상승 2음으로 알린다(트랙 재사용이면 소리 없음).
+const READY_EARCON_MS = 300;
+function checkReady() {
+  const r = st.readyWait;
+  if (!r || !r.frameAt || !st.conv) return;
+  const ms = Math.round(r.frameAt - r.tapAt);
+  const beep = ms > READY_EARCON_MS && st.earcon && !st.soundOff;
+  clearReadyWait();
+  if (beep) earcon('ready');
+  diag(`[conv] 준비 완료 ${ms} ms(알림음 ${beep ? 'Y' : 'N'})`);
+  render();
+}
+
+function clearReadyWait() {
+  if (st.readyWait) clearTimeout(st.readyWait.timer);
+  st.readyWait = null;
 }
 
 // 대화를 시작·끝낼 때 남은 상태를 비운다(재생 큐, 듣기, 무음 감시, 전송 감시)
@@ -1878,6 +1917,7 @@ function stopConversation(why = '') {
   if (!st.conv) return;
   diag(`[conv] 끝(${why || '-'})`);
   st.conv = false;
+  clearReadyWait();
   stopKeepAlive();
   st.convSeq++; // 진행 중인 전송 복구를 무효로
   st.vadSpeech = false;
