@@ -20,7 +20,7 @@ from server import config  # noqa: E402
 from server.tts_qwen import WORKER, QwenTTSEngine  # noqa: E402
 from server.tts_text import normalize_for_tts  # noqa: E402
 
-SR = 44100
+SR = config.AUDIO_OUT_RATE   # QwenTTSEngine.synth_stream 출력 레이트
 GAP_S = 0.4
 S = ["오늘 서울은 맑고 낮 최고 기온은 열여섯 도예요.",
      "저녁에는 쌀쌀해지니까 겉옷을 챙기세요.",

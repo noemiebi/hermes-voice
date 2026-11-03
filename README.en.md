@@ -179,6 +179,8 @@ Path variables fall back to their defaults when left empty.
 | `TTS_FADE_IN_MS` | `60` | Fade-in at the start of each sentence (ms); softens abrupt sentence onsets |
 | `DUCK_RAMP_DOWN_MS` / `DUCK_RAMP_UP_MS` | `60` / `250` | Gain ramps when the duck test lowers and restores playback (ms). The slow restore avoids a sudden jump in volume |
 | `TTS_STEPS` | `5` | Supertonic denoising steps |
+| `AUDIO_OUT_RATE` | `24000` | Sample rate (Hz) of TTS audio sent to the client. `44100` also works (the default up to 0.6.x). Both engines output at this rate, announced in `ready.out_sample_rate`. 24 kHz pcm16 is 48 KB/s (44.1 kHz is 88 KB/s) |
+| `AUDIO_OUT_CODEC` | `pcm16` | Audio frame encoding. `mulaw` sends 8-bit G.711 μ-law (24 KB/s at 24 kHz; telephone-grade, slightly rougher sound). Try it on networks where the downlink often slows down |
 | `TTS_PROVIDER` | `cpu` | `coreml` also works, but CPU measured faster |
 | `TTS_TARGET_RMS_DB` / `TTS_PEAK_DB` | `-18` / `-1` | Loudness normalization of synthesized audio (RMS target over voiced segments, peak ceiling) |
 | `TTS_ENGLISH_MODE` | `keep` | In pronunciation normalization (`server/tts_text.py`, which rewrites text into Korean-readable form before synthesis), English words not in the lexicon are left as is. `spell` reads them letter by letter (acronyms and single capital letters are always spelled out) |

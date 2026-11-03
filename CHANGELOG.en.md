@@ -4,6 +4,15 @@ English · [한국어](CHANGELOG.md)
 
 What changed in each version, and why. Each entry follows symptom → cause → change. "App vNN" is the web app's service worker version; reopening the home-screen app picks up the new version. Entries that only touch the server are marked **(server)** and take effect after a server restart. Defaults and meanings of environment variables are in the [README](README.en.md#environment-variables-env).
 
+## 0.7.0 (2026-11-03) — app v52
+
+**Voice silent for a while, then choppy**
+The reply text appeared in full, but there was no sound at all for 10 seconds, and then it played in roughly one-second bursts (field log 23:38; same pattern at 22:25). The server had synthesized and sent three sentences within a second, yet the client had received 0 s of audio for 10 seconds, while small messages on the same connection (captions, diagnostics) and the microphone uplink were fine. Only the large binary frames (44.1 kHz int16, 88 KB/s) were late, so the cause appears to be stretches where downlink throughput drops to a few tens of KB/s (Tailscale path changes, Wi-Fi power saving, and so on). The network can't be fixed from here, so this release sends less data and stutters less when the link slows.
+- **(server)** Audio is now sent at 24 kHz (`AUDIO_OUT_RATE`, default `24000`; `44100` also works), about 48 KB/s, nearly half. Supertonic output is resampled to 24 kHz after shaping; Qwen is already 24 kHz and is passed through. The echo-correlation reference, playback position and 0.5 s chunking follow this rate.
+- **(server)** `AUDIO_OUT_CODEC=mulaw` sends 8-bit G.711 μ-law (24 KB/s). Default is `pcm16`. The server announces it in `ready.out_codec` and the app decodes accordingly.
+- When the playback queue has run dry and audio starts arriving again, the app no longer plays each chunk immediately: it collects 1.2 s of audio or waits up to 2.5 s (or plays at once if the whole reply has arrived) and then continues. Instead of choppy half-second bursts there is one pause and then smooth playback. The status line shows "소리 받는 중…" (receiving audio) meanwhile. The first sound of a reply still plays right away.
+- Diagnostics: the app's 2 s diagnostic `rx=` now includes the receive rate over the last 2 s in KB/s, `rb=` while rebuffering, and each rebuffer logs `[play] 재버퍼 N s (끊김 M회)`. **(server)** The `재생 지연` (playback lag) log now includes the bytes sent for that reply and the elapsed time, and a single audio chunk send taking over 50 ms logs `송신 지연 N ms`.
+
 ## 0.6.9 (2026-11-03) — app v51
 
 **Removed background playback keep-alive**

@@ -1,4 +1,4 @@
-"""Supertonic 3 TTS 상주. 단일 워커 스레드에서 문장 -> int16 44.1kHz PCM."""
+"""Supertonic 3 TTS 상주. 단일 워커 스레드에서 문장 -> int16 PCM(엔진 44.1 kHz -> 출력 config.AUDIO_OUT_RATE)."""
 from __future__ import annotations
 
 import asyncio
@@ -22,7 +22,7 @@ from .supertonic_helper import (
 
 log = logging.getLogger("tts")
 
-SAMPLE_RATE = 44100
+SAMPLE_RATE = 44100                # Supertonic 엔진 출력(내부 처리) 레이트. 보내는 레이트는 config.AUDIO_OUT_RATE
 FRAME = SAMPLE_RATE * 32 // 1000   # 32 ms 프레임(라우드니스 측정)
 VOICED_DB = -40.0                  # 이보다 큰 프레임만 음성 구간으로 측정
 
@@ -86,6 +86,17 @@ def shape_sentence(wav: np.ndarray, sr: int = SAMPLE_RATE, tail_ms: float = conf
     return out
 
 
+def resample_to(wav: np.ndarray, sr_in: int, sr_out: int) -> np.ndarray:
+    """float 신호를 sr_in -> sr_out으로(scipy resample_poly, 대역 제한 포함). 같으면 그대로."""
+    wav = np.asarray(wav, dtype=np.float32).reshape(-1)
+    if sr_in == sr_out or wav.size == 0:
+        return wav
+    from fractions import Fraction
+    from scipy.signal import resample_poly
+    f = Fraction(sr_out, sr_in)
+    return resample_poly(wav, f.numerator, f.denominator).astype(np.float32)
+
+
 def normalize_loudness(wav: np.ndarray, target_db: float = config.TTS_TARGET_RMS_DB,
                        peak_db: float = config.TTS_PEAK_DB) -> tuple[np.ndarray, float]:
     """음성 구간 RMS를 target_db로 맞추는 이득을 적용(피크는 peak_db 이하로 제한). (신호, 이득 dB)."""
@@ -116,9 +127,11 @@ def build_tts(model_dir: str, provider: str = "cpu") -> TextToSpeech:
 class TTSEngine:
     def __init__(self, model_dir: str = config.SUPERTONIC_MODEL_DIR,
                  voice: str = config.SUPERTONIC_VOICE, speed: float = config.TTS_SPEED,
-                 steps: int = config.TTS_STEPS, provider: str = config.TTS_PROVIDER):
+                 steps: int = config.TTS_STEPS, provider: str = config.TTS_PROVIDER,
+                 out_rate: Optional[int] = None):
         self.model_dir, self.voice, self.speed, self.steps, self.provider = (
             model_dir, voice, speed, steps, provider)
+        self.out_rate = int(out_rate or config.AUDIO_OUT_RATE)   # synth가 돌려주는 PCM 레이트
         self._exec = ThreadPoolExecutor(max_workers=1, thread_name_prefix="tts")
         self.tts: Optional[TextToSpeech] = None
         self.style = None
@@ -153,6 +166,7 @@ class TTSEngine:
         wav = trim_silence(wav)  # Supertonic은 앞뒤로 약 0.4초씩 무음을 붙인다 -> 체감 지연·문장 사이 공백 줄이기
         wav, gain_db = normalize_loudness(wav)
         wav = shape_sentence(wav)  # 페이드 + 문장 끝 쉼(TTS_TAIL_MS)
+        wav = resample_to(wav, SAMPLE_RATE, self.out_rate)  # 44.1 kHz -> 보내는 레이트(기본 24 kHz)
         if log.isEnabledFor(logging.DEBUG):
             before = speech_rms_db(wav / (10 ** (gain_db / 20)))
             log.debug("TTS 레벨: 음성 RMS %.1f -> %.1f dBFS, 이득 %+.1f dB, 피크 %.1f dBFS",
@@ -162,7 +176,7 @@ class TTSEngine:
 
     async def synth(self, text: str, is_current: Callable[[], bool] = lambda: True
                     ) -> Optional[tuple[np.ndarray, int]]:
-        """(pcm int16, ms). 워커에서 차례가 왔을 때 is_current()가 거짓이면 건너뛰고 None."""
+        """(pcm int16 self.out_rate, ms). 워커에서 차례가 왔을 때 is_current()가 거짓이면 건너뛰고 None."""
         def job():
             if not is_current():
                 return None

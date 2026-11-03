@@ -105,7 +105,7 @@ server.on('upgrade', (req, sock) => {
 
 // ---------- 가짜 음성 세션 ----------
 
-const OUT_RATE = 44100;
+const OUT_RATE = 24000; // 서버 기본(AUDIO_OUT_RATE)과 같게, ready.out_sample_rate로 알림
 // 핸즈프리 흉내 VAD(RMS 기준, 0~1). 진짜 서버는 Silero VAD.
 const VAD_RMS = Number(process.env.MOCK_VAD_RMS || 0.02);
 const BARGE_RMS = Number(process.env.MOCK_BARGE_RMS || 0.05);

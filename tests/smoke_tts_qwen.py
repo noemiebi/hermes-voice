@@ -1,11 +1,12 @@
 """실제 Qwen3-TTS 워커 스모크(pytest 밖). 사용: .venv/bin/python tests/smoke_tts_qwen.py [--instruct "..."] [--model id]
-문장 3개의 첫 청크 지연·총 합성 시간·RTF, 워커 메모리(RSS·MLX 최대)를 찍고 tests/out/qwen-smoke/에 44.1 kHz wav 저장.
+문장 3개의 첫 청크 지연·총 합성 시간·RTF, 워커 메모리(RSS·MLX 최대)를 찍고 tests/out/qwen-smoke/에 출력 레이트(config.AUDIO_OUT_RATE) wav 저장.
 --tempos 1.0,1.2: 같은 seed로 속도별 합성(tempo_<t>_<i>.wav), 길이 비율과 프로젝트 STT로 받아쓴 CER 비교."""
 import argparse
 import asyncio
 import subprocess
 import sys
 import time
+from math import gcd
 import wave
 from pathlib import Path
 
@@ -54,7 +55,7 @@ async def main(args) -> None:
             chunks.append(c)
         total = time.perf_counter() - t0
         pcm = np.concatenate(chunks)
-        dur = pcm.size / 44100
+        dur = pcm.size / eng.out_rate
         f = pcm.astype(np.float32) / 32767
         print(f"s{i}: 첫 청크 {first * 1000:.0f} ms (워커 {eng.last.get('worker_first_ms')} ms), 총 {total * 1000:.0f} ms, "
               f"음성 {dur:.2f}s, RTF {total / dur:.2f}, 청크 {len(chunks)}개, RMS {speech_rms_db(f):.1f} dBFS, "
@@ -62,7 +63,7 @@ async def main(args) -> None:
         with wave.open(str(OUT / f"{tag}_{i}.wav"), "wb") as w:
             w.setnchannels(1)
             w.setsampwidth(2)
-            w.setframerate(44100)
+            w.setframerate(eng.out_rate)
             w.writeframes(pcm.tobytes())
     print(f"워커 RSS {rss_mb(eng.proc.pid):.0f} MB, MLX 최대(로드·예열) {eng.info.get('peak_mem_gb')} GB")
     await eng.aclose()
@@ -105,12 +106,12 @@ async def tempo_compare(eng, tempos) -> None:
             with wave.open(str(OUT / f"tempo_{t:g}_{i}.wav"), "wb") as w:
                 w.setnchannels(1)
                 w.setsampwidth(2)
-                w.setframerate(44100)
+                w.setframerate(eng.out_rate)
                 w.writeframes(pcm.tobytes())
-            a16 = resample_poly(pcm.astype(np.float32) / 32768, 160, 441)
+            a16 = resample_poly(pcm.astype(np.float32) / 32768, 16000 // gcd(16000, eng.out_rate), eng.out_rate // gcd(16000, eng.out_rate))
             hyp, _ = await stt.transcribe((np.clip(a16, -1, 1) * 32767).astype("<i2").tobytes())
-            res[t].append((pcm.size / 44100, first * 1000, cer(s, hyp), hyp))
-            print(f"s{i} tempo {t:g}: {pcm.size / 44100:.2f}s 첫 청크 {first * 1000:.0f} ms CER {cer(s, hyp):.3f} | {hyp}")
+            res[t].append((pcm.size / eng.out_rate, first * 1000, cer(s, hyp), hyp))
+            print(f"s{i} tempo {t:g}: {pcm.size / eng.out_rate:.2f}s 첫 청크 {first * 1000:.0f} ms CER {cer(s, hyp):.3f} | {hyp}")
     base = tempos[0]
     for t in tempos:
         L = sum(x[0] for x in res[t])

@@ -1,7 +1,7 @@
 // 서비스 워커: 앱 껍데기는 캐시 우선. 파일을 고치면 VERSION을 올려야 새 껍데기가 내려간다.
 // /ws(WebSocket)와 그 밖의 서버 경로는 건드리지 않는다.
 
-const VERSION = 'hermes-voice-v51';
+const VERSION = 'hermes-voice-v52';
 const SHELL = [
   './',
   'index.html',

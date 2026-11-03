@@ -1,7 +1,7 @@
 """에코 대조 감지기: 받아쓰기 전에 마이크 소리가 내 TTS의 스피커 에코인지 가린다(순수 numpy).
 
 원리(docs/프로토콜.md '에코 대조 감지기'):
-- 서버가 보낸 TTS PCM(44.1 kHz)을 generation별로 16 kHz로 내려 참조 버퍼로 둔다(위치 0 = 첫 샘플).
+- 서버가 보낸 TTS PCM(config.AUDIO_OUT_RATE, 기본 24 kHz)을 generation별로 16 kHz로 내려 참조 버퍼로 둔다(위치 0 = 첫 샘플).
 - 클라이언트가 250 ms마다 보내는 재생 위치(`playback` pos_ms)로 "언제 스피커에서 참조의 어디가 나왔나"
   시간축(PlaybackTimeline)을 만든다. hold·idle이면 그 뒤는 스피커 무음.
 - 마이크 32 ms 창마다 최근 W창(640 ms)의 RMS 포락선(dB)과, 같은 시각들에 스피커에서 나온 참조 포락선을
@@ -64,21 +64,28 @@ def _db(x):
     return 20.0 * np.log10(np.maximum(x, 1e-9))
 
 
-def resample_44k_to_16k(pcm: np.ndarray) -> np.ndarray:
-    """int16(또는 float) 44.1 kHz -> float32 16 kHz [-1,1]."""
-    a = np.asarray(pcm)
+def resample_to_16k(pcm: np.ndarray, sr: int) -> np.ndarray:
+    """int16(또는 float) sr Hz -> float32 16 kHz [-1,1]. sr: 보내는 TTS 레이트(24000·44100 등)."""
+    a = np.asarray(pcm).reshape(-1)
     a = a.astype(np.float32) / 32768.0 if a.dtype == np.int16 else a.astype(np.float32)
-    if a.size == 0:
+    if a.size == 0 or sr == REF_RATE:
         return a
     try:
+        from fractions import Fraction
         from scipy.signal import resample_poly
-        return resample_poly(a, 160, 441).astype(np.float32)
+        f = Fraction(REF_RATE, int(sr))
+        return resample_poly(a, f.numerator, f.denominator).astype(np.float32)
     except Exception:  # noqa: BLE001 scipy 없으면 이동 평균 저역 통과 + 선형 보간 데시메이션
-        k = 3
-        lp = np.convolve(a, np.ones(k, dtype=np.float32) / k, mode="same")
-        n = int(round(a.size * REF_RATE / 44100))
-        x = np.arange(n) * (44100 / REF_RATE)
+        k = max(1, int(round(sr / REF_RATE)))
+        lp = np.convolve(a, np.ones(k, dtype=np.float32) / k, mode="same") if k > 1 else a
+        n = int(round(a.size * REF_RATE / sr))
+        x = np.arange(n) * (sr / REF_RATE)
         return np.interp(x, np.arange(a.size), lp).astype(np.float32)
+
+
+def resample_44k_to_16k(pcm: np.ndarray) -> np.ndarray:
+    """int16(또는 float) 44.1 kHz -> float32 16 kHz [-1,1] (옛 이름)."""
+    return resample_to_16k(pcm, 44100)
 
 
 class ReferenceBuffer:
@@ -87,7 +94,11 @@ class ReferenceBuffer:
     env[i] = 샘플 [i*HOP, i*HOP+WIN)의 RMS = 참조 위치 (16i, 16i+32] ms 구간. '위치 p에서 끝나는 32 ms'는
     i = (p - 32) / 16."""
 
-    def __init__(self, max_s: float = MAX_REF_S):
+    def __init__(self, max_s: float = MAX_REF_S, sr_in: Optional[int] = None):
+        if sr_in is None:
+            from . import config
+            sr_in = config.AUDIO_OUT_RATE
+        self.sr_in = int(sr_in)   # add()로 받는 PCM 레이트(보내는 TTS 레이트)
         self.max_samples = int(max_s * REF_RATE)
         self.gen: Optional[int] = None
         self.reset()
@@ -104,13 +115,13 @@ class ReferenceBuffer:
     def duration_ms(self) -> float:
         return self.samples * 1000.0 / REF_RATE
 
-    def add(self, gen: int, pcm44k) -> None:
+    def add(self, gen: int, pcm) -> None:
         if gen != self.gen:
             self.reset(gen)
         room = self.max_samples - self.samples
         if room <= 0:
             return
-        a = resample_44k_to_16k(pcm44k)[:room]
+        a = resample_to_16k(pcm, self.sr_in)[:room]
         if a.size == 0:
             return
         self._parts.append(a)

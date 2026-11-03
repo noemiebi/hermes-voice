@@ -2,12 +2,12 @@
 
 Qwen3-TTS는 mlx-audio가 필요해 별도 venv(.venv-tts)의 서브프로세스(server/qwen_tts_worker.py)로 돌린다.
 이 모듈은 asyncio로 워커를 띄우고(죽으면 자동 재시작, 최대 3회/10분) JSON lines로 문장을 보내
-24 kHz 청크를 받아 44.1 kHz int16으로 바꿔 흘려 준다.
+24 kHz 청크를 받아 보내는 레이트(config.AUDIO_OUT_RATE, 기본 24 kHz면 리샘플 없이 통과) int16으로 흘려 준다.
 
 신호 처리(청크 단위, 경계 연속):
   앞뒤 무음 정리(SilenceTrimmer, 24 kHz 원신호 기준 -45 dBFS: 앞 60 ms·뒤 120 ms만 남김)
   -> 말 속도 QWEN_TTS_TEMPO배(TempoStretcher, WSOLA 40 ms 조각으로 음높이 유지, 24 kHz)
-  -> 상태 있는 리샘플(StreamResampler, resample_poly 147/80과 같은 결과)
+  -> 상태 있는 리샘플(StreamResampler, 출력 44.1 kHz면 resample_poly 147/80과 같은 결과, 24 kHz면 통과)
   -> 고정 이득(QWEN_TTS_GAIN_DB) -> 소프트 리미터(-1 dBFS 넘지 않음, 하드 클립 없음) -> int16.
 텍스트는 session.py가 normalize_for_tts로 만든 결과를 그대로 받는다(여기서 다시 하지 않음).
 """
@@ -30,7 +30,7 @@ from . import config
 
 log = logging.getLogger("tts_qwen")
 
-OUT_RATE = 44100
+OUT_RATE = config.AUDIO_OUT_RATE   # 기본 출력 레이트(엔진·후처리기는 out_rate로 바꿀 수 있음)
 WORKER = config.ROOT / "server" / "qwen_tts_worker.py"
 
 
@@ -194,22 +194,24 @@ def soft_limit(x: np.ndarray, ceiling_db: float = -1.0, knee_db: float = -4.0) -
 
 
 class QwenPostProcessor:
-    """워커 24 kHz float 청크 -> 44.1 kHz int16 청크(무음 정리·속도(WSOLA)·리샘플·이득·리미터).
+    """워커 24 kHz float 청크 -> out_rate int16 청크(무음 정리·속도(WSOLA)·리샘플·이득·리미터).
     속도 신축은 리샘플 전 24 kHz 단계에서 한다(연산 절약)."""
 
     def __init__(self, sr_in: int, gain_db: float, peak_db: float = -1.0, tempo: float = 1.0,
-                 tail_ms: float = config.QWEN_TTS_TAIL_MS, fade_ms: float = config.QWEN_TTS_FADE_MS):
+                 tail_ms: float = config.QWEN_TTS_TAIL_MS, fade_ms: float = config.QWEN_TTS_FADE_MS,
+                 out_rate: Optional[int] = None):
         # 끝: 모델이 낸 꼬리(작은 받침·여운) 120 ms는 그대로 두고, 신축·리샘플 뒤 남은 무음을 재서
         # 전체 쉼이 정확히 tail_ms가 되도록 무음을 덧붙인다(템포와 무관). 20 ms만 남기면 여린 끝소리가 잘림(2026-11-03).
         self.trim = SilenceTrimmer(sr_in, thresh_db=-55.0, tail_s=0.12)   # 여린 끝소리(-45~-55 dB)도 소리로 침
         self._sr_in = sr_in
-        self.tail_n = max(0, int(OUT_RATE * tail_ms / 1000))
+        self.out_rate = sr = int(out_rate or config.AUDIO_OUT_RATE)
+        self.tail_n = max(0, int(sr * tail_ms / 1000))
         self.tempo = TempoStretcher(sr_in, tempo)
-        self.rs = StreamResampler(sr_in, OUT_RATE)
+        self.rs = StreamResampler(sr_in, sr)   # sr_in == sr(24 kHz)이면 그대로 통과
         self.gain = 10 ** (gain_db / 20)
         self.peak_db = peak_db
-        self.fade_n = max(0, int(OUT_RATE * fade_ms / 1000))  # 문장 끝 페이드(경계의 딱 소리 방지)
-        self.fade_in_n = max(0, int(OUT_RATE * config.TTS_FADE_IN_MS / 1000))  # 문장 시작 페이드(더 길게)
+        self.fade_n = max(0, int(sr * fade_ms / 1000))  # 문장 끝 페이드(경계의 딱 소리 방지)
+        self.fade_in_n = max(0, int(sr * config.TTS_FADE_IN_MS / 1000))  # 문장 시작 페이드(더 길게)
         self._faded_in = self.fade_in_n == 0
 
     def _finish(self, y: np.ndarray, last: bool = False) -> np.ndarray:
@@ -271,8 +273,10 @@ class QwenTTSEngine:
 
     def __init__(self, cmd: Optional[list[str]] = None, env: Optional[dict] = None,
                  voice: str = config.QWEN_TTS_VOICE, gain_db: float = config.QWEN_TTS_GAIN_DB,
-                 ready_timeout_s: float = 300.0, tempo: float = config.QWEN_TTS_TEMPO):
+                 ready_timeout_s: float = 300.0, tempo: float = config.QWEN_TTS_TEMPO,
+                 out_rate: Optional[int] = None):
         self.voice = voice
+        self.out_rate = int(out_rate or config.AUDIO_OUT_RATE)
         self.tempo = tempo
         self.gain_db = gain_db
         self.cmd = cmd or [config.QWEN_TTS_PYTHON, "-I", str(WORKER),
@@ -404,7 +408,7 @@ class QwenTTSEngine:
 
     async def synth_stream(self, text: str, is_current: Callable[[], bool] = lambda: True,
                            seed: Optional[int] = None) -> AsyncIterator[np.ndarray]:
-        """문장 -> int16 44.1 kHz 청크들. is_current()가 거짓이 되면(약 50 ms 안에) 워커에 cancel 보내고 끝.
+        """문장 -> int16 out_rate 청크들. is_current()가 거짓이 되면(약 50 ms 안에) 워커에 cancel 보내고 끝.
         소비자가 중간에 그만두면(aclose) 역시 cancel. 워커 오류는 QwenTTSError."""
         if not self.ready:
             raise QwenTTSError(self.error or "준비 안 됨")
@@ -433,7 +437,7 @@ class QwenTTSEngine:
                 if "pcm" in msg:
                     sr = int(msg.get("sr", 24000))
                     if post is None:
-                        post = QwenPostProcessor(sr, self.gain_db, tempo=self.tempo)
+                        post = QwenPostProcessor(sr, self.gain_db, tempo=self.tempo, out_rate=self.out_rate)
                     raw = np.frombuffer(base64.b64decode(msg["pcm"]), dtype="<i2").astype(np.float32) / 32768.0
                     out = post.push(raw)
                     if out.size:
@@ -509,6 +513,11 @@ class TTSRouter:
     @property
     def loaded(self) -> bool:
         return bool(self.supertonic.loaded or (self.engine == "qwen" and self.qwen and self.qwen.ready))
+
+    @property
+    def out_rate(self) -> int:
+        """내보내는 PCM 레이트(두 엔진 모두 config.AUDIO_OUT_RATE로 맞춤)."""
+        return int(getattr(self.supertonic, "out_rate", None) or config.AUDIO_OUT_RATE)
 
     @property
     def provider(self):

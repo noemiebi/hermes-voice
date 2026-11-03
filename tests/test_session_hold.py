@@ -7,6 +7,7 @@ from pathlib import Path
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from server import config  # noqa: E402
 from server.hermes import TurnResult  # noqa: E402
 from server.session import VoiceSession  # noqa: E402
 from server.vad import VADEvent  # noqa: E402
@@ -48,7 +49,7 @@ class FakeTTS:
 
     async def synth(self, text, is_current=lambda: True):
         await asyncio.sleep(0.005)
-        return (np.zeros(44100, dtype=np.int16), 1) if is_current() else None
+        return (np.zeros(config.AUDIO_OUT_RATE, dtype=np.int16), 1) if is_current() else None  # 1초
 
 
 class FakeHermes:

@@ -77,12 +77,12 @@ def test_post_processor_trims_lead_and_limits_peak():
     pp = QwenPostProcessor(sr, gain_db=6.0)
     parts = [pp.push(c) for c in np.array_split(x, 13)] + [pp.flush()]
     y = np.concatenate(parts).astype(np.float32) / 32767
-    lead = np.flatnonzero(np.abs(y) > 0.01)[0] / 44100
+    lead = np.flatnonzero(np.abs(y) > 0.01)[0] / config.AUDIO_OUT_RATE
     assert 0.03 <= lead <= 0.1, lead                 # 앞 무음은 약 60 ms만
     want = config.QWEN_TTS_TAIL_MS / 1000
-    tail = (y.size - np.flatnonzero(np.abs(y) > 0.01)[-1]) / 44100
+    tail = (y.size - np.flatnonzero(np.abs(y) > 0.01)[-1]) / config.AUDIO_OUT_RATE
     assert want - 0.03 <= tail <= want + 0.06, tail        # 뒤 쉼은 QWEN_TTS_TAIL_MS(기본 300 ms)
-    fn = int(44100 * config.TTS_FADE_IN_MS / 1000)
+    fn = int(config.AUDIO_OUT_RATE * config.TTS_FADE_IN_MS / 1000)
     head = np.abs(y[np.flatnonzero(np.abs(y) > 1e-4)[0]:][:fn + 300])   # 페이드인: 처음은 작게 시작해 페이드 길이 안에 커짐
     assert head[:50].max() < 0.3 and head.max() > 0.5
     assert np.max(np.abs(y)) <= 10 ** (-1 / 20) + 1e-3   # -1 dBFS 넘지 않음
@@ -137,8 +137,8 @@ def test_engine_streams_three_chunks(tmp_path):
     assert len(chunks) >= 3
     assert all(c.dtype == np.int16 for c in chunks)
     total = sum(c.size for c in chunks)
-    tail = int(44100 * config.QWEN_TTS_TAIL_MS / 1000)   # 문장 끝에 붙이는 쉼
-    assert abs(total - int(0.6 * 44100) - tail) < 44100 * 0.1
+    tail = int(config.AUDIO_OUT_RATE * config.QWEN_TTS_TAIL_MS / 1000)   # 문장 끝에 붙이는 쉼
+    assert abs(total - int(0.6 * config.AUDIO_OUT_RATE) - tail) < config.AUDIO_OUT_RATE * 0.1
 
 
 def test_engine_cancel_on_close_and_not_current(tmp_path):
@@ -275,7 +275,8 @@ async def make_session(tmp_path, timeout=2.5):
 
 
 def audio_samples(ws, gen):
-    return sum((len(b) - 4) // 2 for b in ws.audio if struct.unpack("<I", b[:4])[0] == gen)
+    bps = 1 if config.AUDIO_OUT_CODEC == "mulaw" else 2   # 샘플당 바이트(ready.out_codec)
+    return sum((len(b) - 4) // bps for b in ws.audio if struct.unpack("<I", b[:4])[0] == gen)
 
 
 def test_speaker_streams_progressively(tmp_path):
@@ -302,8 +303,8 @@ def test_speaker_streams_progressively(tmp_path):
     assert st.calls == []                                 # 폴백 없음
     assert len([x for x in seen if x > 0]) > 0
     assert len(set(seen)) >= 3                            # 오디오 프레임이 여러 번에 걸쳐 늘어남
-    assert abs(ref_ms - n / 44.1) < 5                     # 참조 버퍼 길이 = 보낸 오디오 길이
-    assert len(sched) == 1 and abs(sched[0][1] - n / 44100) < 1e-6
+    assert abs(ref_ms - n * 1000 / config.AUDIO_OUT_RATE) < 5                     # 참조 버퍼 길이 = 보낸 오디오 길이
+    assert len(sched) == 1 and abs(sched[0][1] - n / config.AUDIO_OUT_RATE) < 1e-6
 
 
 def test_speaker_interrupt_cancels_worker(tmp_path):
@@ -325,7 +326,7 @@ def test_speaker_interrupt_cancels_worker(tmp_path):
         return log, same, sent_after
     log, same, sent = run(main())
     assert cancels(log) == ["cancel 1"]
-    assert same and sent < 40 * 0.2 * 44100               # 끝까지 보내지 않음
+    assert same and sent < 40 * 0.2 * config.AUDIO_OUT_RATE               # 끝까지 보내지 않음
 
 
 def test_speaker_falls_back_to_supertonic(tmp_path):

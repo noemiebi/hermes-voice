@@ -58,6 +58,15 @@ SUPERTONIC_VOICE = os.environ.get("SUPERTONIC_VOICE") or f"{_ST}/voice_styles/F1
 TTS_SPEED = float(os.environ.get("TTS_SPEED", "1.2"))  # Supertonic 말 속도(실사용 1.2배)
 TTS_STEPS = int(os.environ.get("TTS_STEPS", "5"))
 TTS_PROVIDER = os.environ.get("TTS_PROVIDER", "cpu").lower()  # cpu | coreml
+# 클라이언트로 보내는 TTS 오디오: 샘플레이트(24000 기본, 44100도 가능)와 부호화(pcm16 | mulaw).
+# 0.7.0(2026-11-03): 다운링크 처리량이 초당 수십 KB로 떨어지는 구간(Tailscale·Wi-Fi)에서 44.1 kHz(88 KB/s)가
+# 10초 넘게 밀려 24 kHz(48 KB/s)로 내림. mulaw(G.711 8비트)면 24 KB/s. ready.out_sample_rate·out_codec으로 알린다.
+AUDIO_OUT_RATE = int(os.environ.get("AUDIO_OUT_RATE") or "24000")
+if AUDIO_OUT_RATE not in (16000, 22050, 24000, 32000, 44100, 48000):
+    raise ValueError(f"AUDIO_OUT_RATE={AUDIO_OUT_RATE}: 16000·22050·24000·32000·44100·48000 중 하나")
+AUDIO_OUT_CODEC = (os.environ.get("AUDIO_OUT_CODEC") or "pcm16").strip().lower()
+if AUDIO_OUT_CODEC not in ("pcm16", "mulaw"):
+    raise ValueError(f"AUDIO_OUT_CODEC={AUDIO_OUT_CODEC}: pcm16 | mulaw")
 # 합성 결과 라우드니스 정규화: 음성 구간(-40 dBFS 넘는 32 ms 프레임) RMS를 이 값으로, 피크는 TTS_PEAK_DB 이하.
 TTS_TARGET_RMS_DB = float(os.environ.get("TTS_TARGET_RMS_DB", "-18"))
 TTS_PEAK_DB = float(os.environ.get("TTS_PEAK_DB", "-1"))

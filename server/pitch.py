@@ -41,7 +41,7 @@ def to_float(x) -> np.ndarray:
 
 
 def resample(x: np.ndarray, sr: int, to: int = SR) -> np.ndarray:
-    """FFT 방식 리샘플(대역 제한 포함). 44.1 kHz TTS 출력을 16 kHz로 내릴 때 쓴다."""
+    """FFT 방식 리샘플(대역 제한 포함). TTS 출력(config.AUDIO_OUT_RATE)을 16 kHz로 내릴 때 쓴다."""
     x = to_float(x)
     if sr == to or x.size == 0:
         return x
@@ -418,7 +418,7 @@ def tts_keys(tts) -> list[tuple[str, str]]:
 
 
 async def _synth_one(tts, engine: str, text: str) -> Optional[np.ndarray]:
-    """문장 하나를 해당 엔진으로 합성해 44.1 kHz int16. Supertonic은 엔진 워커 스레드(TTSEngine.synth)."""
+    """문장 하나를 해당 엔진으로 합성해 int16(엔진 out_rate, 기본 config.AUDIO_OUT_RATE). Supertonic은 엔진 워커 스레드(TTSEngine.synth)."""
     if engine == "qwen":
         chunks = [np.asarray(c).reshape(-1) async for c in tts.qwen.synth_stream(text)]
         return np.concatenate(chunks) if chunks else None
@@ -428,10 +428,13 @@ async def _synth_one(tts, engine: str, text: str) -> Optional[np.ndarray]:
 
 
 async def learn_tts(tts, store: Optional[VoiceProfileStore] = None, sentences=TTS_LEARN_SENTENCES,
-                    sr: int = 44100) -> list[str]:
+                    sr: Optional[int] = None) -> list[str]:
     """현재 음색(키별)으로 문장들을 합성해 TTS F0 분포를 잰다(이미 잰 키는 건너뜀). 잰 키 목록."""
     import asyncio
     store = store or get_store()
+    if sr is None:
+        r = getattr(tts, "out_rate", None)
+        sr = r if isinstance(r, int) and r > 0 else config.AUDIO_OUT_RATE
     prof = store.profile
     keys = tts_keys(tts)
     prof.active_tts = [k for k, _ in keys]

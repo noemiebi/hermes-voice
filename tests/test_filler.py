@@ -238,7 +238,7 @@ class TimedTTS(ShortTTS):
         if not is_current():
             return None
         self.texts.append(text)
-        n = int(0.3 * 44100) if text in FILLER_TEXTS else 441
+        n = int(0.3 * config.AUDIO_OUT_RATE) if text in FILLER_TEXTS else config.AUDIO_OUT_RATE // 100
         return np.zeros(n, dtype=np.int16), 1
 
 

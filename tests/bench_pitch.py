@@ -61,7 +61,7 @@ async def tts_f0(texts) -> list[np.ndarray]:
     out = []
     for t in texts:
         p, _ = await eng.synth(t)
-        out.append(pitch.resample(p, 44100))
+        out.append(pitch.resample(p, eng.out_rate))
     return out
 
 

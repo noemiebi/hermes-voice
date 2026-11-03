@@ -7,7 +7,7 @@ import numpy as np
 import soundfile as sf
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from server.tts import SAMPLE_RATE, TTSEngine  # noqa: E402
+from server.tts import TTSEngine  # noqa: E402
 
 OUT = Path(__file__).resolve().parent / "out"
 SENTENCES = ["안녕하세요, 반가워요.", "오늘 서울 날씨가 어떤지 알려 줄래?", "내일 오전 열 시에 회의가 있으니까 잊지 말고 알려 줘."]
@@ -18,6 +18,7 @@ if __name__ == "__main__":
     t = time.perf_counter()
     eng.load_sync()
     assert eng.loaded, eng.error
+    SAMPLE_RATE = eng.out_rate   # synth_sync 출력 레이트(config.AUDIO_OUT_RATE)
     print(f"load+warmup {int((time.perf_counter() - t) * 1000)} ms (provider={eng.provider})")
     for i, s in enumerate(SENTENCES):
         t = time.perf_counter()

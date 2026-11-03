@@ -45,4 +45,41 @@ function hvBoost(v) {
   return HV_BOOSTS.includes(n) ? n : 1.5;
 }
 
-if (typeof module !== 'undefined' && module.exports) module.exports = { hvHoldPlan, hvPlayedMs, hvDbfs, hvBoost, HV_BOOSTS };
+// G.711 μ-law 디코드 표(256개, int16 값). 서버 server/audio_out.py mulaw_encode와 짝.
+const HV_MULAW_TABLE = (() => {
+  const t = new Int16Array(256);
+  for (let i = 0; i < 256; i++) {
+    const u = ~i & 0xff;
+    const exp = (u >> 4) & 0x07;
+    const mag = ((((u & 0x0f) << 3) + 0x84) << exp) - 0x84;
+    t[i] = u & 0x80 ? -mag : mag;
+  }
+  return t;
+})();
+
+// μ-law 바이트(Uint8Array) -> Float32Array [-1, 1). out을 주면 거기에 쓴다(길이 >= bytes.length).
+function hvMulawDecode(bytes, out) {
+  const n = bytes.length;
+  const y = out || new Float32Array(n);
+  for (let i = 0; i < n; i++) y[i] = HV_MULAW_TABLE[bytes[i]] / 32768;
+  return y;
+}
+
+// 끊김 뒤 재버퍼링: 모은 길이 bufferedS가 needS 이상이거나, 기다린 시간 waitedS가 maxWaitS 이상이거나,
+// 서버가 이 답의 오디오를 다 보냈으면(speak_end 수신: 같은 WebSocket이라 그 뒤로 이 답 오디오는 없음) 튼다.
+function hvRebufReady(bufferedS, waitedS, ended, needS = 1.2, maxWaitS = 2.5) {
+  return !!ended || bufferedS >= needS - 1e-6 || waitedS >= maxWaitS;
+}
+
+// 최근 windowMs 동안 받은 양(KB/s). log: [[시각 ms, 바이트], ...] 오래된 순. now: 지금(ms).
+// 창 밖 항목은 log 앞에서 지운다(제자리).
+function hvRxRate(log, now, windowMs = 2000) {
+  while (log.length && now - log[0][0] > windowMs) log.shift();
+  let b = 0;
+  for (const it of log) b += it[1];
+  return b / 1024 / (windowMs / 1000);
+}
+
+if (typeof module !== 'undefined' && module.exports) {
+  module.exports = { hvHoldPlan, hvPlayedMs, hvDbfs, hvBoost, HV_BOOSTS, HV_MULAW_TABLE, hvMulawDecode, hvRebufReady, hvRxRate };
+}

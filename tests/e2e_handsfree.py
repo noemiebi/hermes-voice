@@ -24,7 +24,8 @@ URL = sys.argv[1] if len(sys.argv) > 1 else "ws://127.0.0.1:8482/ws"
 OUT = Path(__file__).resolve().parent / "out"
 SR = 16000
 FRAME = SR // 10  # 100 ms
-OUT_RATE = 44100
+OUT_RATE = 24000   # hello()가 ready.out_sample_rate로 덮어씀
+OUT_BPS = 2        # 샘플당 바이트(pcm16 2, mulaw 1): ready.out_codec
 
 QUESTION = "가을에 가 볼 만한 국내 여행지 세 군데를 하나씩 설명해 줘."
 BARGE = "잠깐만, 그만하고 삼 더하기 사는 얼마인지 말해 줘."
@@ -34,12 +35,12 @@ def tts_clip(name: str, text: str) -> np.ndarray:
     """TTS로 만든 16 kHz int16 음성(캐시). 앞뒤 무음은 잘라 둔다."""
     path = OUT / f"{name}.wav"
     if not path.exists():
-        from server.tts import SAMPLE_RATE, TTSEngine
+        from server.tts import TTSEngine
         eng = TTSEngine()
         eng.load_sync()
         assert eng.loaded, eng.error
         pcm = eng.synth_sync(text).astype(np.float32)
-        idx = np.arange(0, len(pcm), SAMPLE_RATE / SR)
+        idx = np.arange(0, len(pcm), eng.out_rate / SR)
         pcm16k = np.interp(idx, np.arange(len(pcm)), pcm).astype(np.int16)
         OUT.mkdir(exist_ok=True)
         sf.write(path, pcm16k, SR, subtype="PCM_16")
@@ -137,7 +138,7 @@ class Client:
             now = time.perf_counter()
             if isinstance(m, bytes):
                 g = struct.unpack("<I", m[:4])[0]
-                n = (len(m) - 4) // 2
+                n = (len(m) - 4) // OUT_BPS
                 self.audio_by_gen[g] = self.audio_by_gen.get(g, 0) + 1
                 for _, ig in self.interrupts:
                     if g < ig:
@@ -192,6 +193,9 @@ async def hello(ws):
     while True:
         m = json.loads(await asyncio.wait_for(ws.recv(), 10))
         if m["type"] == "ready":
+            global OUT_RATE, OUT_BPS
+            OUT_RATE = int(m.get("out_sample_rate", OUT_RATE))
+            OUT_BPS = 1 if m.get("out_codec") == "mulaw" else 2
             return m
 
 

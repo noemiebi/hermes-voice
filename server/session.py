@@ -23,7 +23,8 @@ from .history import HistoryStore
 from . import pitch as pitchmod
 from .sentences import SentenceSplitter
 from .stt import STTEngine
-from .tts import SAMPLE_RATE as OUT_RATE, TTSEngine
+from . import audio_out
+from .tts import TTSEngine
 from .tts_text import normalize_for_tts
 from .vad import Endpointer, VADEvent, VADParams
 
@@ -127,7 +128,8 @@ def filler_for_tool(name: str, style: str = "formal") -> Optional[str]:
     return phrase + tail if phrase else None
 
 
-CHUNK_SAMPLES = OUT_RATE // 2          # 약 0.5초씩 전송
+CHUNK_S = 0.5                          # 약 0.5초씩 전송(샘플 수 = out_rate * CHUNK_S)
+SEND_SLOW_MS = 50                      # send_bytes가 이보다 오래 걸리면 송신 지연 로그(역압 관찰)
 MAX_UTTERANCE_BYTES = 16000 * 2 * 90   # 90초
 _END = object()                        # 턴 끝 표시
 HEARD_NOTE_CHARS = 120                 # 끊긴 답 노트에 넣는 "들은 부분" 최대 길이
@@ -156,6 +158,12 @@ class VoiceSession:
     def __init__(self, ws: WebSocket, stt: STTEngine, tts: TTSEngine, hermes: HermesClient,
                  store: Optional[HistoryStore] = None, pitch_store: Optional["pitchmod.VoiceProfileStore"] = None):
         self.ws, self.stt, self.tts, self.hermes = ws, stt, tts, hermes
+        # 보내는 TTS 오디오 레이트·부호화(엔진이 이 레이트로 낸다: config.AUDIO_OUT_RATE, 기본 24 kHz)
+        r = getattr(tts, "out_rate", None)
+        self.out_rate = r if isinstance(r, int) and not isinstance(r, bool) and r > 0 else config.AUDIO_OUT_RATE
+        self.out_codec = config.AUDIO_OUT_CODEC if config.AUDIO_OUT_CODEC in audio_out.CODECS else "pcm16"
+        self.chunk_samples = int(self.out_rate * CHUNK_S)
+        self._tx = {"gen": -1, "bytes": 0, "t0": 0.0, "t1": 0.0}  # 이 generation 오디오 전송 바이트·첫/마지막 전송 시각(재생 지연 진단)
         self.store = store                # 화면 대화 기록·마지막 세션(server/history.py). None이면 기록 안 함
         self.session_id: Optional[str] = None
         self.model = "voice-fast"
@@ -210,7 +218,7 @@ class VoiceSession:
         self._turn_echo = False
         self._inlog = [0.0, 0, 0.0]       # VOICE_INPUT_LOG: 제곱합, 샘플 수, VAD 최대
         # 에코 대조 감지기(server/aec_gate.py): 받아쓰기 전에 에코를 가림
-        self.aec_ref = ReferenceBuffer()  # generation별 TTS 참조(16 kHz)
+        self.aec_ref = ReferenceBuffer(sr_in=self.out_rate)  # generation별 TTS 참조(out_rate -> 16 kHz)
         self.timeline = PlaybackTimeline()  # 클라이언트 pos_ms로 만든 재생 시간축
         self.gate = EchoGate()
         self._aec_on = False              # pos_ms를 보내는 클라이언트일 때만 감지기 사용
@@ -255,14 +263,27 @@ class VoiceSession:
             except Exception:  # noqa: BLE001 연결 끊김
                 self._closed = True
 
-    async def send_audio(self, gen: int, pcm: bytes) -> None:
+    async def send_audio(self, gen: int, pcm) -> None:
+        """int16 PCM(self.out_rate) 한 청크를 out_codec으로 부호화해 `<I gen` 머리와 함께 보낸다."""
         if self._closed:
             return
+        if isinstance(pcm, (bytes, bytearray, memoryview)):
+            pcm = np.frombuffer(bytes(pcm), dtype="<i2")
+        body = audio_out.encode(pcm, self.out_codec)
+        if self._tx["gen"] != gen:
+            self._tx = {"gen": gen, "bytes": 0, "t0": self.clock(), "t1": self.clock()}
+        self._tx["bytes"] += len(body) + 4
         async with self._send_lock:
+            t = time.perf_counter()
             try:
-                await self.ws.send_bytes(struct.pack("<I", gen & 0xFFFFFFFF) + pcm)
+                await self.ws.send_bytes(struct.pack("<I", gen & 0xFFFFFFFF) + body)
             except Exception:  # noqa: BLE001
                 self._closed = True
+                return
+            self._tx["t1"] = self.clock()
+            ms = (time.perf_counter() - t) * 1000
+            if ms > SEND_SLOW_MS:
+                log.info("송신 지연 %d ms (%d B, gen %d)", int(ms), len(body) + 4, gen)
 
     async def set_state(self, state: str) -> None:
         if state != self.state:
@@ -278,7 +299,8 @@ class VoiceSession:
 
     async def send_ready(self) -> None:
         await self.send_json({"type": "ready", "session_id": self.session_id, "model": self.model,
-                              "out_sample_rate": OUT_RATE, "agent_name": config.AGENT_NAME,
+                              "out_sample_rate": self.out_rate, "out_codec": self.out_codec,
+                              "agent_name": config.AGENT_NAME,
                               "model_labels": config.MODEL_LABELS})
 
     # ---------- 수명 ----------
@@ -800,7 +822,10 @@ class VoiceSession:
         lag = (exp - pos) / 1000.0
         if lag > 2.0 and now - self._lag_logged >= 5.0:
             self._lag_logged = now
-            log.info("재생 지연: 클라이언트 %.1f s 뒤처짐 (pos %.0f ms, 예상 %.0f ms)", lag, pos, exp)
+            tx = self._tx if self._tx["gen"] == gen else {"bytes": 0, "t0": now, "t1": now}
+            log.info("재생 지연: 클라이언트 %.1f s 뒤처짐 (pos %.0f ms, 예상 %.0f ms) 전송 %.0f KB(첫 전송 뒤 %.1f s, "
+                     "마지막 전송 %.1f s 전, %s %d Hz)", lag, pos, exp, tx["bytes"] / 1024, now - tx["t0"],
+                     now - tx["t1"], self.out_codec, self.out_rate)
 
     def _barge_mode(self) -> bool:
         """끼어들기 기준(엄격)을 쓸 상황: 턴이 생각·말하는 중이거나, 보낼 문장이 남았거나, 스피커 재생 중.
@@ -1596,15 +1621,15 @@ class VoiceSession:
                 self.aec_ref.add(gen, pcm)
                 total += len(pcm)
                 if self._sched_gen == gen and self._sched:
-                    self._sched[-1] = (st0, total / OUT_RATE)
-                self._play_until = max(self._play_until, self.clock()) + len(pcm) / OUT_RATE
+                    self._sched[-1] = (st0, total / self.out_rate)
+                self._play_until = max(self._play_until, self.clock()) + len(pcm) / self.out_rate
                 if total == len(pcm):
                     self.echo.add(item, spoken, end=self._est_play_end(gen))  # 보관은 추정 재생 종료부터
-                for i in range(0, len(pcm), CHUNK_SAMPLES):
+                for i in range(0, len(pcm), self.chunk_samples):
                     await self._wait_hold(gen)
                     if gen != self.generation:
                         break
-                    await self.send_audio(gen, pcm[i:i + CHUNK_SAMPLES].tobytes())
+                    await self.send_audio(gen, pcm[i:i + self.chunk_samples])
         except Exception as e:  # noqa: BLE001
             log.exception("TTS failed")
             if gen == self.generation:
@@ -1613,7 +1638,7 @@ class VoiceSession:
             await stream.aclose()
         if started:
             log.info("TTS(%s) 첫 청크 %d ms, 총 %d ms, %.1f s 음성: %s", getattr(self.tts, "last_engine", "?"),
-                     first_ms or 0, int((time.perf_counter() - t0) * 1000), total / OUT_RATE, item)
+                     first_ms or 0, int((time.perf_counter() - t0) * 1000), total / self.out_rate, item)
         return started
 
     async def _filler_gap(self, gen: int, filler_end: float) -> None:
@@ -1689,7 +1714,7 @@ class VoiceSession:
                 if res is None or gen != self.generation:
                     continue
                 pcm, ms = res
-                log.info("TTS %d ms, %.1f s 음성: %s", ms, len(pcm) / OUT_RATE, item)
+                log.info("TTS %d ms, %.1f s 음성: %s", ms, len(pcm) / self.out_rate, item)
                 await self._wait_hold(gen)
                 if gen != self.generation:
                     continue
@@ -1703,14 +1728,14 @@ class VoiceSession:
                 if self._sched_gen != gen:
                     self._sched_gen, self._sched = gen, []
                 st0 = max(self._sched[-1][0] + self._sched[-1][1], self.clock()) if self._sched else self.clock()
-                self._sched.append((st0, len(pcm) / OUT_RATE))
-                self._play_until = max(self._play_until, self.clock()) + len(pcm) / OUT_RATE
+                self._sched.append((st0, len(pcm) / self.out_rate))
+                self._play_until = max(self._play_until, self.clock()) + len(pcm) / self.out_rate
                 self.echo.add(item, spoken, end=self._est_play_end(gen))  # 보관은 추정 재생 종료부터
-                for i in range(0, len(pcm), CHUNK_SAMPLES):
+                for i in range(0, len(pcm), self.chunk_samples):
                     await self._wait_hold(gen)
                     if gen != self.generation:
                         break
-                    await self.send_audio(gen, pcm[i:i + CHUNK_SAMPLES].tobytes())
+                    await self.send_audio(gen, pcm[i:i + self.chunk_samples])
                 if _is_filler(item):
                     filler_gen, filler_end = gen, self._est_play_end(gen)
             finally:

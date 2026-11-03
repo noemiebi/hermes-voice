@@ -153,7 +153,8 @@ def test_tts_keys_and_learn():
         loaded, voice = True, "/x/voice_styles/F1.json"
 
         async def synth(self, text, is_current=lambda: True):
-            t = np.arange(44100) / 44100
+            sr = config.AUDIO_OUT_RATE   # 엔진은 보내는 레이트로 낸다
+            t = np.arange(sr) / sr
             x = (np.sin(2 * np.pi * 218 * t) + 0.5 * np.sin(2 * np.pi * 436 * t)) * 0.2
             return (x * 32767).astype(np.int16), 1
 

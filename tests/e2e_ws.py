@@ -36,7 +36,9 @@ async def main():
         await ws.send(json.dumps({"type": "hello", "resume": None, "client": "e2e"}))
         ready = await wait_ready(ws)
         print("ready:", ready)
-        assert ready["out_sample_rate"] == 44100 and ready["session_id"]
+        rate, codec = ready["out_sample_rate"], ready.get("out_codec", "pcm16")
+        assert rate in (16000, 22050, 24000, 32000, 44100, 48000) and codec in ("pcm16", "mulaw"), ready
+        assert ready["session_id"]
 
         # ---- 1) 음성 턴 ----
         await ws.send(json.dumps({"type": "start_utterance"}))

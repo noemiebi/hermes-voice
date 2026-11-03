@@ -4,11 +4,15 @@
 //   끄려면 Safari 콘솔(또는 웹 검사기)에서 localStorage.setItem('hv.keepalive', '0') 후 새로 고침. 다시 켜려면 removeItem.
 'use strict';
 
-const APP_VERSION = '0.6.9';
+const APP_VERSION = '0.7.0';
 const AGENT_NAME_DEFAULT = 'Herbot'; // 서버 ready의 agent_name이 오면 그걸 쓴다
 const KEEPALIVE_LEVEL = 1e-5; // 약 -100 dBFS
 const DIAG_BUF_MAX = 20; // WS가 닫힌 동안 모아 둘 진단 줄 수
-const OUT_RATE_DEFAULT = 44100;
+const OUT_RATE_DEFAULT = 24000; // 서버 ready.out_sample_rate가 오면 그걸 쓴다(0.7.0부터 기본 24 kHz)
+// 끊김 뒤 재버퍼링(0.7.0): 이 답에서 재생하던 큐가 바닥난 뒤 오디오가 다시 오면 REBUFFER_S만큼 모이거나
+// REBUFFER_MAX_WAIT_S가 지날 때까지 모았다가 이어서 튼다(다운링크가 느려졌을 때 0.5초마다 뚝뚝 끊기는 대신).
+const REBUFFER_S = 1.2;
+const REBUFFER_MAX_WAIT_S = 2.5;
 const TAP_MS = 300; // 이보다 짧게 누르면 토글 모드
 const LS = { session: 'hv.session', model: 'hv.model', aecOff: 'hv.aecOff', ptt: 'hv.ptt', halfDuplex: 'hv.halfDuplex', earcon: 'hv.earcon', showText: 'hv.showText', boost: 'hv.boost', log: 'hv.log', keepalive: 'hv.keepalive', token: 'hv.token' };
 
@@ -98,6 +102,11 @@ const st = {
   pbState: 'idle', // 서버에 마지막으로 알린 playback 상태
   serverState: 'idle',
   outRate: OUT_RATE_DEFAULT,
+  outCodec: 'pcm16', // 서버 ready.out_codec: pcm16 | mulaw(8비트 G.711)
+  genStarted: false, // 이 generation에서 재생을 한 번이라도 시작했나(첫 청크는 즉시, 그 뒤 바닥나면 재버퍼)
+  rebuf: null, // 재버퍼링 중 { gen, bufs, dur, t0, timer }
+  underruns: 0, // 이 generation에서 큐가 바닥나 재버퍼한 횟수
+  rxLog: [], // 진단: 최근 수신 [시각 ms, 바이트](2초 KB/s)
   // 입력
   listening: false, // start_utterance ~ end_utterance 사이
   toggleMode: false, // 짧게 탭해서 켠 듣기
@@ -340,6 +349,7 @@ function trackTurn(s) {
 function statusText(s) {
   if (st.authFail) return '접속 토큰이 필요합니다';
   if (st.micNote) return st.micNote;
+  if (st.rebuf) return '소리 받는 중…';
   if (s === 'starting') return '마이크 준비 중…';
   if (s === 'idle' && st.convPaused && !st.ptt && !st.conv) return '탭해서 다시 시작';
   if (s === 'listening' && st.ptt && st.toggleMode) return '듣는 중 · 다시 누르면 끝';
@@ -881,6 +891,7 @@ function onEvent(m) {
         localStorage.setItem(LS.session, m.session_id);
       }
       if (m.out_sample_rate) st.outRate = m.out_sample_rate;
+      st.outCodec = m.out_codec === 'mulaw' ? 'mulaw' : 'pcm16';
       if (typeof m.agent_name === 'string' && m.agent_name.trim()) { st.agentName = m.agent_name.trim(); if (el.appName) el.appName.textContent = st.agentName; }
       if (m.model_labels && typeof m.model_labels === 'object') {
         const hint = document.getElementById('modelHint');
@@ -942,7 +953,11 @@ function onEvent(m) {
       onSpeakStart(m.generation);
       break;
     case 'speak_end':
-      if (m.generation === st.gen) st.speakEnded = true;
+      if (m.generation === st.gen) {
+        st.speakEnded = true;
+        // 이 답 오디오는 speak_end 앞에 다 왔다(같은 WebSocket, 순서 보장): 재버퍼 중이면 바로 튼다
+        if (st.rebuf && st.rebuf.gen === m.generation) flushRebuf('끝');
+      }
       break;
     case 'vad':
       st.vadSpeech = !!m.speech;
@@ -1023,21 +1038,32 @@ function onSpeakStart(gen) {
     st.gen = gen;
     st.pbBaseMs = 0; // 재생 위치는 generation마다 0부터
     st.rxSec = 0;
+    st.genStarted = false;
+    st.underruns = 0;
   }
   st.speakEnded = false;
 }
 
+// 바이너리 프레임: <I generation>(4바이트 LE) + 본문(pcm16: int16 LE, mulaw: 8비트 G.711). docs/프로토콜.md
 function onAudio(buf) {
-  if (!(buf instanceof ArrayBuffer) || buf.byteLength < 6) return;
+  if (!(buf instanceof ArrayBuffer) || buf.byteLength < 5) return;
+  st.rxLog.push([performance.now(), buf.byteLength]); // 진단: 수신 처리량(버리는 generation도 셈)
+  if (st.rxLog.length > 400) st.rxLog.splice(0, st.rxLog.length - 400);
   const gen = new DataView(buf).getUint32(0, true);
   if (gen !== st.gen || st.deadGens.has(gen)) return;
   const ctx = st.ctx;
   if (!ctx) return; // 아직 사용자 제스처 전이면 재생 불가
-  const n = (buf.byteLength - 4) >> 1;
-  const pcm = new Int16Array(buf, 4, n);
+  const mulaw = st.outCodec === 'mulaw';
+  const n = mulaw ? buf.byteLength - 4 : (buf.byteLength - 4) >> 1;
+  if (n <= 0) return;
   const ab = ctx.createBuffer(1, n, st.outRate);
   const ch = ab.getChannelData(0);
-  for (let i = 0; i < n; i++) ch[i] = pcm[i] / 32768;
+  if (mulaw) {
+    hvMulawDecode(new Uint8Array(buf, 4, n), ch);
+  } else {
+    const pcm = new Int16Array(buf.slice(4, 4 + n * 2)); // slice: 홀수 바이트 오프셋에서도 정렬 보장
+    for (let i = 0; i < n; i++) ch[i] = pcm[i] / 32768;
+  }
   st.rxSec += ab.duration;
   st.rxAt = performance.now();
   if (st.turn) st.turn.firstAudio = true; // 첫 오디오가 나오면 "아직 준비 중" 알림음은 그만
@@ -1046,7 +1072,36 @@ function onAudio(buf) {
     if (st.held.gen === gen) st.held.bufs.push(ab);
     return;
   }
+  if (st.rebuf && st.rebuf.gen === gen) {
+    st.rebuf.bufs.push(ab);
+    st.rebuf.dur += ab.duration;
+    if (hvRebufReady(st.rebuf.dur, (performance.now() - st.rebuf.t0) / 1000, false, REBUFFER_S, REBUFFER_MAX_WAIT_S)) flushRebuf();
+    return;
+  }
+  if (st.genStarted && st.sources.size === 0) {
+    // 이 답을 재생하다 큐가 바닥났다(다운링크 지연): 바로 틀면 0.5초 청크마다 끊기므로 조금 모은다
+    st.underruns += 1;
+    st.rebuf = { gen, bufs: [ab], dur: ab.duration, t0: performance.now(), timer: null };
+    if (hvRebufReady(ab.duration, 0, false, REBUFFER_S, REBUFFER_MAX_WAIT_S)) { flushRebuf(); return; }
+    st.rebuf.timer = setTimeout(() => flushRebuf('시간'), REBUFFER_MAX_WAIT_S * 1000);
+    render();
+    return;
+  }
   scheduleBuffer(ab);
+}
+
+// 재버퍼 모은 것을 재생 큐에 이어 붙인다(nextTime은 이미 지났으므로 scheduleBuffer가 now+0.06부터 잡는다).
+function flushRebuf(why = '') {
+  const rb = st.rebuf;
+  if (!rb) return;
+  st.rebuf = null;
+  clearTimeout(rb.timer);
+  const waited = (performance.now() - rb.t0) / 1000;
+  diag(`[play] 재버퍼 ${rb.dur.toFixed(1)} s (끊김 ${st.underruns}회, ${waited.toFixed(1)} s 기다림${why ? ', ' + why : ''}) ${pageDesc()}`);
+  if (rb.gen !== st.gen || st.deadGens.has(rb.gen) || !st.ctx) { render(); return; }
+  if (st.held && st.held.gen === rb.gen) { st.held.bufs.push(...rb.bufs); render(); return; }
+  for (const ab of rb.bufs) scheduleBuffer(ab);
+  render();
 }
 
 // AudioBuffer 하나를 재생 큐 끝(st.nextTime)에 이어 붙인다.
@@ -1063,6 +1118,7 @@ function scheduleBuffer(ab) {
   src._hvAt = st.nextTime; // hold 때 남은 부분 계산용
   st.nextTime += ab.duration;
   st.sources.add(src);
+  st.genStarted = true;
   src.onended = () => {
     if (st.sources.has(src)) st.pbBaseMs += ab.duration * 1000;
     st.sources.delete(src);
@@ -1107,6 +1163,11 @@ function onHold(gen) {
   }
   st.sources.clear();
   st.nextTime = 0;
+  if (st.rebuf && st.rebuf.gen === gen) { // 재버퍼 중 모은 것도 보관 뒤에(재생 순서 유지)
+    clearTimeout(st.rebuf.timer);
+    bufs.push(...st.rebuf.bufs);
+    st.rebuf = null;
+  }
   st.held = { gen, bufs };
   console.info('[play] hold', gen, `${bufs.reduce((a, b) => a + b.duration, 0).toFixed(2)}s 보관`);
   render();
@@ -1182,6 +1243,7 @@ function stopPlayback() {
   }
   st.sources.clear();
   st.held = null; // 보관분도 버린다
+  if (st.rebuf) { clearTimeout(st.rebuf.timer); st.rebuf = null; } // 재버퍼 중 모은 것도 버린다
   clearDuck();
   st.nextTime = 0;
   reportPlayback('idle');
@@ -2176,7 +2238,8 @@ setInterval(() => {
   }
 }, 1000);
 
-// 진단: 재생 큐·수신·화면 상태. q=큐에 남은 재생 초(nextTime - currentTime), rx=이 generation에서 받은 오디오 초(마지막 청크 수신 뒤 경과),
+// 진단: 재생 큐·수신·화면 상태. q=큐에 남은 재생 초(nextTime - currentTime), rb=재버퍼 중 모은 초,
+// rx=이 generation에서 받은 오디오 초(마지막 청크 수신 뒤 경과, 최근 2초 수신 KB/s: 모든 오디오 프레임),
 // out=ctx.outputLatency(ms), vis=document.visibilityState, focus=document.hasFocus()
 function pageDesc() {
   const ctx = st.ctx;
@@ -2184,7 +2247,9 @@ function pageDesc() {
   let focus = '-';
   try { focus = document.hasFocus() ? 'Y' : 'N'; } catch { /* */ }
   const rxAgo = st.rxAt ? `${((performance.now() - st.rxAt) / 1000).toFixed(1)}s 전` : '-';
-  return `q=${queueLeft().toFixed(1)}s rx=${st.rxSec.toFixed(1)}s(${rxAgo}) out=${lat} vis=${document.visibilityState} focus=${focus}`;
+  const kbs = hvRxRate(st.rxLog, performance.now(), 2000);
+  const rb = st.rebuf ? ` rb=${st.rebuf.dur.toFixed(1)}s` : '';
+  return `q=${queueLeft().toFixed(1)}s${rb} rx=${st.rxSec.toFixed(1)}s(${rxAgo}, ${kbs.toFixed(0)} KB/s) out=${lat} vis=${document.visibilityState} focus=${focus}`;
 }
 
 // 대화 중 2초마다 입력 레벨과 오디오 상태를 콘솔에(화면에는 표시하지 않음)

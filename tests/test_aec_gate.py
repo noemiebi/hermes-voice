@@ -51,7 +51,7 @@ def noise_floor(n, db=-65.0, seed=9):
 
 
 def run_gate(mic: np.ndarray, ref44: np.ndarray, gate=None, ref_on=True):
-    ref = ReferenceBuffer()
+    ref = ReferenceBuffer(sr_in=44100)
     if ref_on:
         ref.add(3, ref44)
     else:
@@ -135,7 +135,7 @@ def test_hold_freezes_speaker():
     """hold 뒤(스피커 멈춤)에는 참조가 무음이라 판정 보류."""
     ref44 = make_ref(seed=7)
     ref16 = resample_44k_to_16k(ref44)
-    ref = ReferenceBuffer()
+    ref = ReferenceBuffer(sr_in=44100)
     ref.add(1, ref44)
     tl = PlaybackTimeline()
     tl.report(1, 0.0, 0.0)
@@ -275,7 +275,7 @@ def _onset_setup(user_db=None, user_at_s=1.0):
         s = int(user_at_s * SR)
         u = np.random.default_rng(5).standard_normal(mic.size - s).astype(np.float32) * 10 ** (user_db / 20)
         mic[s:] += u
-    ref = ReferenceBuffer()
+    ref = ReferenceBuffer(sr_in=44100)
     ref.add(9, ref44)
     tl = PlaybackTimeline()
     tl.report(9, 0.0, 1.0)                    # 시각 1.0에 참조 위치 0
@@ -329,7 +329,7 @@ def test_level_rule_outside_onset():
     echo = voiced_scale(echo_of(ref16, delay_ms=85), -51)
 
     def run(mic):
-        ref = ReferenceBuffer()
+        ref = ReferenceBuffer(sr_in=44100)
         ref.add(4, ref44)
         tl = PlaybackTimeline()
         tl.report(4, 0.0, 0.0)
@@ -378,7 +378,7 @@ def _burst_ref(ms=300, db=-18.0):
 
 
 def _first_window(gate, t=0.5, mic_db=-55.0):
-    ref = ReferenceBuffer()
+    ref = ReferenceBuffer(sr_in=44100)
     ref.add(3, _burst_ref())
     tl = PlaybackTimeline()
     tl.report(3, 0.0, 0.0)
