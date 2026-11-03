@@ -93,6 +93,13 @@ DUCK_GAIN = float(os.environ.get("DUCK_GAIN", "0.2"))  # 실기: 0.3에서 에�
 DUCK_TEST_DELAY_MS = int(os.environ.get("DUCK_TEST_DELAY_MS", "180"))  # hold 뒤 이만큼 지나서부터
 DUCK_TEST_MS = int(os.environ.get("DUCK_TEST_MS", "300"))              # 이 시간 동안 마이크 평균을 잰다
 DUCK_DROP_DB = float(os.environ.get("DUCK_DROP_DB", "6"))              # hold 전보다 이만큼 내려가면 에코
+# 확실한 에코면 덕킹 검사 생략: 최근 DUCK_SKIP_WINDOWS창(판정된 것) corr 중앙값 ≥ DUCK_SKIP_CORR이고
+# mic_db 중앙값 ≤ expected_db 중앙값 + DUCK_SKIP_LEVEL_DB면 hold 없이 재생 유지, 말 끝에서 대조로 판정. 0이면 끔
+DUCK_SKIP_CORR = float(os.environ.get("DUCK_SKIP_CORR", "0.7"))
+DUCK_SKIP_LEVEL_DB = float(os.environ.get("DUCK_SKIP_LEVEL_DB", "4.0"))
+DUCK_SKIP_WINDOWS = int(os.environ.get("DUCK_SKIP_WINDOWS", "6"))
+# 생략 뒤 말이 HOLD_CONFIRM_MS 넘게 이어지고 비에코 창이 이만큼 나오면 그때 hold(덕킹 검사)
+DUCK_SKIP_REVOKE_WINDOWS = int(os.environ.get("DUCK_SKIP_REVOKE_WINDOWS", "4"))
 # 매 턴 사용자 글 앞에 붙이는 음성용 스타일 노트(빈 문자열이면 끔)
 AGENT_NAME = os.environ.get("AGENT_NAME", "Herbot").strip() or "Herbot"  # 음성 대화 상대 이름(헤더·스타일 노트)
 # 빠름/깊게 라우트에 실제로 붙은 모델의 표시 이름(설정 시트·스타일 노트). 비우면 표시·노트 생략

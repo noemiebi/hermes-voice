@@ -231,3 +231,116 @@ def test_global_echo_filter_long_after_tail():
         assert len(ws.of("transcript")) == n_tr + 1
         s.speaker_task.cancel()
     asyncio.run(go())
+
+
+# ---------- 확실한 에코면 덕킹 생략(DUCK_SKIP_*) ----------
+from server.aec_gate import GateResult  # noqa: E402
+
+
+async def setup_skip():
+    s, ws, stt, hermes, gen = await setup_duck()
+    await s._on_text(json.dumps({"type": "playback", "state": "speaking", "generation": gen, "pos_ms": 1000}))
+    assert s._aec_on and s.timeline.active(s.clock())
+    return s, ws, stt, hermes, gen
+
+
+def fill_recent(s, corr, mic_db, expected_db, n=6, echo=True):
+    s._gate_recent = [GateResult(echo=echo, judged=True, corr=corr, mic_db=mic_db, expected_db=expected_db,
+                                 rule="상관" if echo else "레벨초과+상관낮음") for _ in range(n)]
+
+
+async def start_now(s):
+    s.endpointer.in_speech, s.endpointer.speech_ms = True, 416
+    await s._on_vad(VADEvent("start", barge=True))
+
+
+def test_sure_echo_skips_duck():
+    async def go():
+        s, ws, stt, hermes, gen = await setup_skip()
+        fill_recent(s, 0.9, -46.0, -45.0)
+        await start_now(s)
+        assert not ws.of("hold") and not s.holding and s._echo_check
+        assert s._duck_skip is not None and s._playing()
+        # 말 끝: 대조로 에코 -> 받아쓰기 없이 무시, 재생 그대로
+        s.endpointer.in_speech = False
+        await s._on_vad(VADEvent("end", pcm=b"\0\0" * 16000, speech_ms=600, echo_frac=0.9, echo_judged=12))
+        await settle()
+        assert stt.calls == 0 and not ws.of("interrupt") and s.generation == gen
+        assert s.state == "speaking"
+        s.speaker_task.cancel()
+    asyncio.run(go())
+
+
+def test_sure_echo_but_loud_mic_holds():
+    async def go():
+        s, ws, stt, hermes, gen = await setup_skip()
+        fill_recent(s, 0.9, -35.0, -45.0)          # expected + 10 dB
+        await start_now(s)
+        assert ws.of("hold") and s.holding and s._duck_skip is None
+        s.speaker_task.cancel()
+    asyncio.run(go())
+
+
+def test_low_corr_holds():
+    async def go():
+        s, ws, stt, hermes, gen = await setup_skip()
+        fill_recent(s, 0.3, -46.0, -45.0)
+        await start_now(s)
+        assert ws.of("hold") and s.holding
+        s.speaker_task.cancel()
+    asyncio.run(go())
+
+
+def test_duck_skip_disabled(monkeypatch):
+    monkeypatch.setattr(config, "DUCK_SKIP_CORR", 0.0)
+
+    async def go():
+        s, ws, stt, hermes, gen = await setup_skip()
+        fill_recent(s, 0.95, -46.0, -45.0)
+        await start_now(s)
+        assert ws.of("hold") and s.holding
+        s.speaker_task.cancel()
+    asyncio.run(go())
+
+
+def test_nan_expected_holds():
+    async def go():
+        s, ws, stt, hermes, gen = await setup_skip()
+        fill_recent(s, 0.95, -46.0, float("nan"))
+        await start_now(s)
+        assert ws.of("hold") and s.holding
+        s.speaker_task.cancel()
+    asyncio.run(go())
+
+
+def test_duck_skip_revoked_by_long_non_echo_speech():
+    async def go():
+        s, ws, stt, hermes, gen = await setup_skip()
+        fill_recent(s, 0.9, -46.0, -45.0)
+        await start_now(s)
+        assert not s.holding
+        # 비에코 창이 이어져도 HOLD_CONFIRM_MS 전에는 그대로
+        s._duck_skip["nonecho"] = 6
+        await s._on_text(json.dumps({"type": "playback", "state": "speaking", "generation": gen, "pos_ms": 1300}))
+        await feed(s, -40, 480, seed=70)
+        assert not s.holding
+        await s._on_text(json.dumps({"type": "playback", "state": "speaking", "generation": gen, "pos_ms": 1800}))
+        await feed(s, -40, 480, seed=80)            # 960 ms 경과 -> hold(덕킹 검사)
+        assert ws.of("hold") and s.holding and s._duck_skip is None
+        s.speaker_task.cancel()
+    asyncio.run(go())
+
+
+def test_duck_skip_not_revoked_without_non_echo():
+    async def go():
+        s, ws, stt, hermes, gen = await setup_skip()
+        fill_recent(s, 0.9, -46.0, -45.0)
+        await start_now(s)
+        s._duck_skip["nonecho"] = 2
+        for k in range(3):
+            await s._on_text(json.dumps({"type": "playback", "state": "speaking", "generation": gen,
+                                         "pos_ms": 1300 + k * 500}))
+            await feed(s, -46, 480, seed=90 + k)
+        assert not ws.of("hold") and not s.holding
+        s.speaker_task.cancel()
+    asyncio.run(go())

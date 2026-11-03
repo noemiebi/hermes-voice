@@ -191,6 +191,8 @@ Path variables fall back to their defaults when left empty.
 | `SMART_TURN_THRESHOLD` | `0.5` | smart-turn completion probability threshold |
 | `SMART_TURN_MODEL` | `models/smart-turn-v3.2-cpu.onnx` | Model path (if missing, logs a warning and uses the silence rule only) |
 | `SILERO_VAD_MODEL` | the installed `silero_vad/data/silero_vad.onnx` | VAD model path |
+| `DUCK_SKIP_CORR` | `0.7` | When speech starts during playback and the median echo-gate corr of recent windows is at least this (and the level condition holds), treat it as certain echo and keep playing without the duck test. `0` disables |
+| `DUCK_SKIP_LEVEL_DB` | `4` | Level condition for skipping the duck: median mic_db of recent windows must be at most median expected_db + this |
 
 For speaker-echo countermeasure settings (`HOLD_*`, `ECHO_*`, `DUCK_*`, etc.), see `server/config.py` and the "스피커 에코 대책" (speaker echo countermeasures) section of `docs/프로토콜.md` (Korean).
 

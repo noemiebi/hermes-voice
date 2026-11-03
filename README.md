@@ -191,6 +191,8 @@ curl -s http://127.0.0.1:8480/health
 | `SMART_TURN_THRESHOLD` | `0.5` | smart-turn 완료 확률 기준 |
 | `SMART_TURN_MODEL` | `models/smart-turn-v3.2-cpu.onnx` | 모델 경로(없으면 경고 후 침묵 기준만 씀) |
 | `SILERO_VAD_MODEL` | 설치된 `silero_vad/data/silero_vad.onnx` | VAD 모델 경로 |
+| `DUCK_SKIP_CORR` | `0.7` | 재생 중 말 시작 때 최근 대조 창 corr 중앙값이 이 이상(그리고 레벨 조건)이면 확실한 에코로 보고 덕킹 검사 없이 재생 유지. `0`이면 끔 |
+| `DUCK_SKIP_LEVEL_DB` | `4` | 덕킹 생략 레벨 조건: 최근 창 mic_db 중앙값이 expected_db 중앙값 + 이 값 이하일 때만 |
 
 스피커 에코 대책 관련 값(`HOLD_*`, `ECHO_*`, `DUCK_*` 등)은 `server/config.py`와 `docs/프로토콜.md` '스피커 에코 대책'을 보세요.
 

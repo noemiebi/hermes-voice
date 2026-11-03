@@ -120,6 +120,7 @@ class VoiceSession:
         self._hold_mode = "pause"         # 지금 hold의 방식
         self._mic_hist: list[tuple[float, float]] = []  # (시각, 창 평균 제곱) 최근 3초
         self._duck: Optional[dict] = None  # 진행 중인 덕킹 검사 {"at", "pre_db"}
+        self._duck_skip: Optional[dict] = None  # 확실한 에코로 덕킹을 생략한 발화 {"at", "nonecho"}
         self.style_note = config.VOICE_STYLE_NOTE
 
     # ---------- 송신 ----------
@@ -220,6 +221,7 @@ class VoiceSession:
             if (self.holding and self._hold_task is None and self.endpointer.in_speech
                     and self._confirm_ms() - self._hold_base_ms >= self.hold_confirm_ms):
                 await self._confirm_hold()
+            await self._check_duck_skip()
             if config.VOICE_INPUT_LOG:
                 self._log_input(data)
 
@@ -315,6 +317,8 @@ class VoiceSession:
         r = self.gate.process(win, t, self.aec_ref, self.timeline, active=active)
         self._gate_recent.append(r)
         del self._gate_recent[:-16]
+        if self._duck_skip is not None and r.judged and not r.echo:
+            self._duck_skip["nonecho"] += 1
         if config.VOICE_INPUT_LOG and active:
             g = self._gatelog
             g[0] += 1
@@ -334,6 +338,44 @@ class VoiceSession:
         if not r.judged:
             return None
         return r.echo
+
+    def _sure_echo(self) -> bool:
+        """덕킹 검사를 생략할 만큼 확실한 에코인가: 최근 DUCK_SKIP_WINDOWS창 중 판정된 창이 절반 이상이고
+        그 corr 중앙값 ≥ DUCK_SKIP_CORR, mic_db 중앙값 ≤ expected_db 중앙값 + DUCK_SKIP_LEVEL_DB.
+        expected_db가 없는(NaN) 창은 레벨 비교에서 빠지고, 남는 창이 없으면 생략하지 않는다.
+        시작보호(onset) 창은 게이트가 여유(+ONSET_EXTRA_DB)를 더 주지만 여기서는 더 주지 않는다(보수적)."""
+        n = config.DUCK_SKIP_WINDOWS
+        if config.DUCK_SKIP_CORR <= 0 or n <= 0 or not self._aec_on:
+            return False
+        if not self.timeline.active(self.clock()):
+            return False
+        rs = [r for r in self._gate_recent[-n:] if r.judged]
+        if len(rs) < max(1, (n + 1) // 2):
+            return False
+        lv = [r for r in rs if r.expected_db == r.expected_db]
+        if len(lv) < max(1, (n + 1) // 2):
+            return False
+        corr = float(np.median([r.corr for r in rs]))
+        mic = float(np.median([r.mic_db for r in lv]))
+        exp = float(np.median([r.expected_db for r in lv]))
+        return corr >= config.DUCK_SKIP_CORR and mic <= exp + config.DUCK_SKIP_LEVEL_DB
+
+    async def _check_duck_skip(self) -> None:
+        """덕킹을 생략한 발화가 HOLD_CONFIRM_MS 넘게 이어지고 비에코 창이 DUCK_SKIP_REVOKE_WINDOWS개 이상이면
+        생략을 취소하고 hold(덕킹 검사)로 간다."""
+        d = self._duck_skip
+        if d is None:
+            return
+        ep = self.endpointer
+        if self.holding or ep is None or not ep.in_speech or not self._playing():
+            self._duck_skip = None
+            return
+        if (self.clock() - d["at"] >= self.hold_confirm_ms / 1000
+                and d["nonecho"] >= config.DUCK_SKIP_REVOKE_WINDOWS):
+            self._duck_skip = None
+            log.info("덕킹 생략 취소: 말이 %d ms 넘게 이어지고 비에코 %d창 -> hold", self.hold_confirm_ms, d["nonecho"])
+            await self._hold()
+            await self.set_state("listening")
 
     def _gate_echo(self, ev: VADEvent) -> bool:
         """발화의 음성 창 중 에코 우세 비율이 ECHO_GATE_FRAC 이상이면 True(받아쓰기 없이 에코)."""
@@ -452,6 +494,7 @@ class VoiceSession:
             self._speech_wall = time.perf_counter()
             # 재생 중이거나 재생이 막 끝난 뒤 시작된 말은 받아쓴 뒤 에코인지 본다
             self._echo_check = self._playing() or self.clock() < self._tail_until
+            self._duck_skip = None
             if self.holding:
                 # 잠정 끼어들기 판정 중 말이 다시 시작: 받아쓰던 발화를 붙이고 hold 유지
                 if self._hold_task and not self._hold_task.done():
@@ -478,7 +521,13 @@ class VoiceSession:
                 # 경계 시점에 일반 모드로 시작이 났어도 실제 재생 중이면 반드시 hold로 보낸다.
                 if not ev.barge:
                     log.info("일반 모드 시작이지만 재생 중 -> hold로 판정")
-                await self._hold()
+                if self._sure_echo():
+                    # 확실한 에코: 음량을 흔들지 않고 재생 유지, 말 끝에서 대조(_gate_echo)로 판정
+                    log.info("확실한 에코 -> 덕킹 생략 (%s)", self._gate_desc())
+                    self._echo_check = True
+                    self._duck_skip = {"at": self.clock(), "nonecho": 0}
+                else:
+                    await self._hold()
             elif ev.barge:
                 t = time.perf_counter()
                 await self.interrupt(announce=False, notify=True)
@@ -487,8 +536,10 @@ class VoiceSession:
             elif ev.tail:
                 log.info("꼬리 가드 구간에서 말 시작(에코 검사 예정)")
             await self.send_json({"type": "vad", "speech": True})
-            await self.set_state("listening")
+            if self._duck_skip is None:  # 덕킹 생략이면 재생이 이어지니 speaking 유지
+                await self.set_state("listening")
         elif ev.kind in ("end", "discard"):
+            self._duck_skip = None
             await self.send_json({"type": "vad", "speech": False})
             carry, self._carry = self._carry, b""
             pcm = carry + ev.pcm
@@ -507,14 +558,14 @@ class VoiceSession:
                 return
             if ev.kind == "discard" and not carry:
                 log.info("짧은 발화 버림 (%d ms)", ev.speech_ms)
-                await self.set_state(self.rest_state())
+                await self.set_state("speaking" if self._playing() else self.rest_state())
                 return
             log.info("말 끝 (음성 %d ms, 끝 침묵 %d ms, 발화 %.2f s%s)", ev.speech_ms, ev.end_lag_ms,
                      len(pcm) / 32000, f", smart-turn {ev.smart}" if ev.smart else "")
             echo_check, self._echo_check = self._echo_check, False
             if echo_check and self._gate_echo(ev):
                 log.info("에코 무시(대조): %s (음성 %d ms)", self._gate_desc(ev), ev.speech_ms)
-                await self.set_state(self.rest_state())
+                await self.set_state("speaking" if self._playing() else self.rest_state())
                 return
             self._start_turn(pcm=pcm, echo_check=echo_check)
 
