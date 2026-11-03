@@ -117,10 +117,6 @@
         <input type="checkbox" class="switch" role="switch" id="earcon">
       </label>
       <label class="sheet-item">
-        <span class="sheet-text">화면이 꺼져도 재생 유지<small>대화 중 무음 오디오를 함께 틀어 화면이 꺼지거나 다른 앱으로 가도 답이 이어지게 해 봅니다. 잠금 화면의 일시정지로 대화를 끝낼 수 있습니다.</small></span>
-        <input type="checkbox" class="switch" role="switch" id="bgAudio">
-      </label>
-      <label class="sheet-item">
         <span class="sheet-text">글 입력칸<small>켜면 화면 맨 아래에 글로 보내는 입력칸이 나타납니다.</small></span>
         <input type="checkbox" class="switch" role="switch" id="showText">
       </label>
@@ -141,9 +137,6 @@
     </details>
   </div>
 </div>
-
-<!-- 백그라운드 재생 유지(시도): 대화 중 무음 루프. JS가 대화 시작·끝에 play/pause -->
-<audio id="bgKeep" src="silence.wav" loop playsinline preload="auto"></audio>
 
 <script src="worklet.js"></script>
 <script src="playcore.js"></script>

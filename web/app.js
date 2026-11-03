@@ -2,16 +2,15 @@
 // 계약: docs/프로토콜.md
 // 출력 유지(keep-alive): 대화 중 earBus에 -100 dBFS 상수 신호를 흘려 iOS가 재생 끝 무음 때 마이크를 mute하는 것을 줄인다.
 //   끄려면 Safari 콘솔(또는 웹 검사기)에서 localStorage.setItem('hv.keepalive', '0') 후 새로 고침. 다시 켜려면 removeItem.
-// 백그라운드 재생 유지(시도, 0.6.8): 대화 중 무음 <audio id="bgKeep"> 루프 + navigator.mediaSession. 설정 시트 토글(hv.bgAudio).
 'use strict';
 
-const APP_VERSION = '0.6.8';
+const APP_VERSION = '0.6.9';
 const AGENT_NAME_DEFAULT = 'Herbot'; // 서버 ready의 agent_name이 오면 그걸 쓴다
 const KEEPALIVE_LEVEL = 1e-5; // 약 -100 dBFS
 const DIAG_BUF_MAX = 20; // WS가 닫힌 동안 모아 둘 진단 줄 수
 const OUT_RATE_DEFAULT = 44100;
 const TAP_MS = 300; // 이보다 짧게 누르면 토글 모드
-const LS = { session: 'hv.session', model: 'hv.model', aecOff: 'hv.aecOff', ptt: 'hv.ptt', halfDuplex: 'hv.halfDuplex', earcon: 'hv.earcon', showText: 'hv.showText', boost: 'hv.boost', log: 'hv.log', keepalive: 'hv.keepalive', bgAudio: 'hv.bgAudio', token: 'hv.token' };
+const LS = { session: 'hv.session', model: 'hv.model', aecOff: 'hv.aecOff', ptt: 'hv.ptt', halfDuplex: 'hv.halfDuplex', earcon: 'hv.earcon', showText: 'hv.showText', boost: 'hv.boost', log: 'hv.log', keepalive: 'hv.keepalive', token: 'hv.token' };
 
 const $ = (id) => document.getElementById(id);
 const el = {
@@ -23,7 +22,7 @@ const el = {
   textForm: $('textForm'), textInput: $('textInput'), toast: $('toast'),
   menu: $('menu'), menuBtn: $('menuBtn'), menuClose: $('menuClose'),
   newSession: $('newSession'), aec: $('aec'), info: $('info'), infoSummary: $('infoSummary'), sheetVer: $('sheetVer'), appName: $('appName'),
-  pttMode: $('pttMode'), halfDuplex: $('halfDuplex'), earcon: $('earcon'), showText: $('showText'), bgAudio: $('bgAudio'), bgKeep: $('bgKeep'),
+  pttMode: $('pttMode'), halfDuplex: $('halfDuplex'), earcon: $('earcon'), showText: $('showText'),
   boostBtns: [...document.querySelectorAll('.seg-btn[data-boost]')],
   tokenForm: $('tokenForm'), tokenInput: $('tokenInput'),
 };
@@ -135,8 +134,6 @@ const st = {
   trackSuspect: false, // 백그라운드·interrupted가 60초 넘게 이어졌다 복귀함: 다음 무음 판정을 1초로
   awaySince: 0, // visibility hidden 또는 ctx interrupted가 시작된 시각
   keepAlive: null, // 출력 유지 상수 소스(st.sources와 별개: playing·재생 위치·분석기에 안 섞임)
-  mediaHandlers: false, // navigator.mediaSession 액션 핸들러를 걸었음
-  bgKeepWant: false, // 대화 중 무음 <audio>(bgKeep)를 재생하고 있어야 함(외부에서 멈추면 복귀 때 다시 play)
   rxSec: 0, // 진단: 이 generation에서 받은 오디오 길이(초)
   rxAt: 0, // 진단: 마지막 오디오 청크를 받은 시각
   diagBuf: [], // WS가 닫힌 동안의 진단 줄 { text, at }
@@ -644,79 +641,6 @@ function stopKeepAlive() {
   if (!src) return;
   try { src.stop(); } catch { /* */ }
   try { src.disconnect(); } catch { /* */ }
-}
-
-// ---------- 백그라운드 재생 유지(시도, 0.6.8) ----------
-// iOS 홈 화면 앱은 화면이 꺼지거나 다른 앱으로 가면 Web Audio 출력이 멈추거나 끊긴다. 대화 중에는 무음 <audio> 루프(bgKeep)를
-// 사용자 제스처(구체 탭) 안에서 play()해 두고 navigator.mediaSession을 설정해 "미디어 재생 중"으로 보이게 한다.
-// muted=true면 iOS가 오디오 세션을 잡지 않으므로 muted=false + volume 0(iOS는 volume을 무시하지만 파일 자체가 무음).
-// Web Audio 그래프(ctx·keep-alive·재생 체인)와는 연결하지 않는다. 설정 시트 "화면이 꺼져도 재생 유지"(hv.bgAudio, 기본 켬).
-function bgAudioEnabled() {
-  try { return localStorage.getItem(LS.bgAudio) === '1'; } catch { return false; }
-}
-
-// 제스처 안에서 동기로 부를 것(play()는 제스처 밖에서 NotAllowedError가 날 수 있음)
-function bgKeepStart(why) {
-  const a = el.bgKeep;
-  if (!a || !bgAudioEnabled()) return;
-  st.bgKeepWant = true;
-  setMediaSession(true);
-  if (!a.paused) return;
-  a.muted = false;
-  try { a.volume = 0; } catch { /* iOS: 읽기 전용 */ }
-  a.loop = true;
-  let p;
-  try { p = a.play(); } catch (e) { diag(`[bg] 무음 오디오 play 실패(${why}) ${e && e.name} ${e && e.message}`, 'warn'); return; }
-  if (p && typeof p.then === 'function') {
-    p.then(() => diag(`[bg] 무음 오디오 재생(${why})`))
-      .catch((e) => diag(`[bg] 무음 오디오 play 거부(${why}) ${e && e.name} ${e && e.message}`, 'warn'));
-  }
-}
-
-function bgKeepStop(why) {
-  st.bgKeepWant = false;
-  setMediaSession(false);
-  const a = el.bgKeep;
-  if (!a || a.paused) return;
-  try { a.pause(); } catch { /* */ }
-  diag(`[bg] 무음 오디오 멈춤(${why})`);
-}
-
-// 잠금 화면·제어 센터의 미디어 컨트롤: 일시정지·정지 = 대화 끝내기, 재생 = 대화 다시 시작(가능하면)
-function setMediaSession(on) {
-  const ms = navigator.mediaSession;
-  if (!ms) return;
-  try {
-    if (on && typeof MediaMetadata === 'function') {
-      ms.metadata = new MediaMetadata({
-        title: 'Hermes Voice', artist: st.agentName,
-        artwork: [{ src: 'icons/icon-192.png', sizes: '192x192', type: 'image/png' }, { src: 'icons/icon-512.png', sizes: '512x512', type: 'image/png' }],
-      });
-    }
-    ms.playbackState = on ? 'playing' : 'paused';
-  } catch { /* */ }
-  if (st.mediaHandlers) return;
-  st.mediaHandlers = true;
-  const set = (action, fn) => { try { ms.setActionHandler(action, fn); } catch { /* 지원 안 함 */ } };
-  const end = (action) => () => {
-    diag(`[bg] 미디어 컨트롤 ${action}${st.conv ? ': 대화 끝내기' : ''}`);
-    if (st.conv) stopConversation(`미디어 컨트롤 ${action}`);
-    else bgKeepStop(`미디어 컨트롤 ${action}`);
-    render();
-  };
-  set('pause', end('pause'));
-  set('stop', end('stop'));
-  set('play', () => {
-    diag(`[bg] 미디어 컨트롤 play${st.conv ? '' : ': 대화 다시 시작'}`);
-    if (st.conv || st.convStarting) { bgKeepStart('미디어 컨트롤 play'); return; }
-    startConversation('미디어 컨트롤');
-  });
-}
-
-if (el.bgKeep) {
-  // iOS가 통화·다른 앱 오디오로 무음 <audio>를 멈추면 남겨 둔다(복귀 때 recoverAll이 다시 play)
-  el.bgKeep.addEventListener('pause', () => { if (st.bgKeepWant) diag(`[bg] 무음 오디오가 외부에서 멈춤 ${pageDesc()}`, 'warn'); });
-  el.bgKeep.addEventListener('error', () => { const e = el.bgKeep.error; diag(`[bg] 무음 오디오 오류 ${e ? e.code : '-'}`, 'warn'); });
 }
 
 function outGainValue() {
@@ -1985,7 +1909,6 @@ async function startConversation(why = '') {
     return;
   }
   resetConvState();
-  bgKeepStart(why || '대화 시작'); // 제스처 안에서 동기로(무음 <audio> play)
   st.zeroFailed = false; // 무음 복구 실패 표시는 새 대화마다 초기화
   const tap = why === '구체 탭';
   const tapAt = tap ? st.tapAt : 0;
@@ -2014,7 +1937,6 @@ async function startConversation(why = '') {
     st.convStarting = false;
     clearReadyWait();
     diag(`[conv] 시작 실패 ${err && err.name} ${err && err.message}`, 'warn');
-    if (seq === st.convSeq) bgKeepStop('대화 시작 실패');
     toast(micErrorText(err), 7000);
     addLine('sys err', micErrorText(err));
     render();
@@ -2022,7 +1944,7 @@ async function startConversation(why = '') {
   }
   st.convStarting = false;
   if (seq !== st.convSeq) return;
-  if (!st.capture) { clearReadyWait(); bgKeepStop('대화 시작 실패(캡처 없음)'); render(); return; }
+  if (!st.capture) { clearReadyWait(); render(); return; }
   st.conv = true;
   st.convStartAt = performance.now();
   st.vadSpeech = false;
@@ -2103,7 +2025,6 @@ function stopConversation(why = '') {
   st.conv = false;
   clearReadyWait();
   stopKeepAlive();
-  bgKeepStop(why || '대화 끝');
   st.convSeq++; // 진행 중인 전송 복구를 무효로
   st.vadSpeech = false;
   captureCmd('abort'); // 전송 중지
@@ -2256,16 +2177,14 @@ setInterval(() => {
 }, 1000);
 
 // 진단: 재생 큐·수신·화면 상태. q=큐에 남은 재생 초(nextTime - currentTime), rx=이 generation에서 받은 오디오 초(마지막 청크 수신 뒤 경과),
-// out=ctx.outputLatency(ms), vis=document.visibilityState, focus=document.hasFocus(), bg=무음 <audio> 상태
+// out=ctx.outputLatency(ms), vis=document.visibilityState, focus=document.hasFocus()
 function pageDesc() {
   const ctx = st.ctx;
   const lat = ctx && typeof ctx.outputLatency === 'number' && isFinite(ctx.outputLatency) ? `${Math.round(ctx.outputLatency * 1000)}ms` : '-';
   let focus = '-';
   try { focus = document.hasFocus() ? 'Y' : 'N'; } catch { /* */ }
   const rxAgo = st.rxAt ? `${((performance.now() - st.rxAt) / 1000).toFixed(1)}s 전` : '-';
-  const a = el.bgKeep;
-  const bg = !bgAudioEnabled() ? 'off' : (a ? (a.paused ? 'paused' : 'play') : '-');
-  return `q=${queueLeft().toFixed(1)}s rx=${st.rxSec.toFixed(1)}s(${rxAgo}) out=${lat} vis=${document.visibilityState} focus=${focus} bg=${bg}`;
+  return `q=${queueLeft().toFixed(1)}s rx=${st.rxSec.toFixed(1)}s(${rxAgo}) out=${lat} vis=${document.visibilityState} focus=${focus}`;
 }
 
 // 대화 중 2초마다 입력 레벨과 오디오 상태를 콘솔에(화면에는 표시하지 않음)
@@ -2504,7 +2423,6 @@ el.menuBtn.addEventListener('click', () => {
   el.pttMode.checked = st.ptt;
   el.halfDuplex.checked = st.halfDuplex;
   el.earcon.checked = st.earcon;
-  if (el.bgAudio) el.bgAudio.checked = bgAudioEnabled();
   el.menu.hidden = false;
 });
 el.menuClose.addEventListener('click', () => { el.menu.hidden = true; });
@@ -2550,14 +2468,6 @@ el.earcon.addEventListener('change', () => {
   localStorage.setItem(LS.earcon, st.earcon ? '1' : '0');
   if (st.earcon) { ensureContext(); earcon('heard'); } // 미리 들려 주기
 });
-if (el.bgAudio) el.bgAudio.addEventListener('change', () => {
-  const on = el.bgAudio.checked;
-  try { localStorage.setItem(LS.bgAudio, on ? '1' : '0'); } catch { /* */ }
-  diag(`[bg] 설정 화면이 꺼져도 재생 유지 ${on ? '켬' : '끔'}`);
-  if (!on) bgKeepStop('설정 끔');
-  else if (st.conv) bgKeepStart('설정 켬'); // 토글 탭이 제스처
-  toast(on ? '화면이 꺼져도 재생을 유지해 볼게요.' : '화면이 꺼지면 재생이 멈출 수 있어요.');
-});
 el.showText.addEventListener('change', () => {
   st.showText = el.showText.checked;
   localStorage.setItem(LS.showText, st.showText ? '1' : '0');
@@ -2596,7 +2506,6 @@ async function recoverAll(why) {
     return;
   }
   await recoverContext();
-  if (st.bgKeepWant && el.bgKeep && el.bgKeep.paused) bgKeepStart(`복귀 ${why}`); // 외부(통화·다른 앱)에서 멈춘 경우
   await recoverMic();
   if (await checkCtxStall(why) && st.conv && !playing() && !st.micMuted) fixMic(`복귀 ${why}: ct 정지`, true);
   if (!st.wsOpen) reconnectNow(`복귀 ${why}(복구 뒤)`);

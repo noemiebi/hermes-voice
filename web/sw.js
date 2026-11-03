@@ -1,7 +1,7 @@
 // 서비스 워커: 앱 껍데기는 캐시 우선. 파일을 고치면 VERSION을 올려야 새 껍데기가 내려간다.
 // /ws(WebSocket)와 그 밖의 서버 경로는 건드리지 않는다.
 
-const VERSION = 'hermes-voice-v50';
+const VERSION = 'hermes-voice-v51';
 const SHELL = [
   './',
   'index.html',
@@ -9,7 +9,6 @@ const SHELL = [
   'app.js',
   'worklet.js',
   'playcore.js',
-  'silence.wav',
   'manifest.json',
   'icon.svg',
   'icons/icon-192.png',
@@ -51,9 +50,6 @@ self.addEventListener('fetch', (e) => {
   if (url.origin !== self.location.origin) return;
   if (url.pathname === '/ws' || url.pathname.startsWith('/ws/') || url.pathname.startsWith('/api/')) return;
   if (req.headers.get('upgrade')) return;
-  // 미디어(<audio id="bgKeep"> silence.wav)는 Safari가 Range 요청을 보내고 206을 기대한다. 캐시의 200 전체 응답을 주면
-  // iOS에서 재생이 실패할 수 있어 Range 요청은 가로채지 않는다(서버 StaticFiles가 206으로 답함).
-  if (req.headers.has('range')) return;
   e.respondWith(
     caches.match(req, { ignoreSearch: true }).then((hit) => {
       if (hit) return hit;
