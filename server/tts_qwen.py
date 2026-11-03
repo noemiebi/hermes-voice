@@ -199,8 +199,10 @@ class QwenPostProcessor:
 
     def __init__(self, sr_in: int, gain_db: float, peak_db: float = -1.0, tempo: float = 1.0,
                  tail_ms: float = config.QWEN_TTS_TAIL_MS, fade_ms: float = config.QWEN_TTS_FADE_MS):
-        # 끝 무음은 거의 다 잘라 내고(20 ms), 신축·리샘플 뒤에 정확히 tail_ms 무음을 붙인다(템포와 무관한 쉼)
-        self.trim = SilenceTrimmer(sr_in, tail_s=0.02)
+        # 끝: 모델이 낸 꼬리(작은 받침·여운) 120 ms는 그대로 두고, 신축·리샘플 뒤 남은 무음을 재서
+        # 전체 쉼이 정확히 tail_ms가 되도록 무음을 덧붙인다(템포와 무관). 20 ms만 남기면 여린 끝소리가 잘림(2026-11-03).
+        self.trim = SilenceTrimmer(sr_in, thresh_db=-55.0, tail_s=0.12)   # 여린 끝소리(-45~-55 dB)도 소리로 침
+        self._sr_in = sr_in
         self.tail_n = max(0, int(OUT_RATE * tail_ms / 1000))
         self.tempo = TempoStretcher(sr_in, tempo)
         self.rs = StreamResampler(sr_in, OUT_RATE)
@@ -222,9 +224,11 @@ class QwenPostProcessor:
                 y[i0:i0 + n] *= np.linspace(0.0, 1.0, n, endpoint=False, dtype=np.float32)
                 self._faded_in = True
         if last and self.fade_n:
-            n = min(self.fade_n, y.size)
+            nz = np.flatnonzero(np.abs(y) > 10 ** (-50 / 20))
+            end = int(nz[-1]) + 1 if nz.size else y.size      # 마지막 소리 샘플까지를 페이드아웃
+            n = min(self.fade_n, end)
             y = y.copy()
-            y[-n:] *= np.linspace(1.0, 0.0, n, dtype=np.float32)
+            y[end - n:end] *= np.linspace(1.0, 0.0, n, dtype=np.float32)
         return (np.clip(y, -1.0, 1.0) * 32767).astype(np.int16)
 
     def push(self, a: np.ndarray) -> np.ndarray:
@@ -233,11 +237,16 @@ class QwenPostProcessor:
 
     def flush(self) -> np.ndarray:
         t = self.tempo.push(self.trim.flush())
-        t = np.concatenate([t, self.tempo.flush()])
+        # WSOLA flush는 마지막 조각(수십 ms)을 버린다. 무음 100 ms를 넣어 버려지는 게 소리가 아니라 무음이 되게 한다.
+        t = np.concatenate([t, self.tempo.push(np.zeros(int(self._sr_in * 0.1), dtype=np.float32)), self.tempo.flush()])
         y = self.rs.push(t) if t.size else np.zeros(0)
         out = self._finish(np.concatenate([y, self.rs.flush()]), last=True)
         if out.size and self.tail_n:
-            out = np.concatenate([out, np.zeros(self.tail_n, dtype=np.int16)])
+            quiet = np.flatnonzero(np.abs(out.astype(np.int32)) > int(32767 * 10 ** (-50 / 20)))  # -50 dBFS 넘는 마지막 샘플
+            trailing = out.size - (int(quiet[-1]) + 1) if quiet.size else out.size
+            pad = self.tail_n - trailing
+            if pad > 0:
+                out = np.concatenate([out, np.zeros(pad, dtype=np.int16)])
         return out
 
 

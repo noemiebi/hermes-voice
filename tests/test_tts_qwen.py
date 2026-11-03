@@ -79,10 +79,11 @@ def test_post_processor_trims_lead_and_limits_peak():
     y = np.concatenate(parts).astype(np.float32) / 32767
     lead = np.flatnonzero(np.abs(y) > 0.01)[0] / 44100
     assert 0.03 <= lead <= 0.1, lead                 # 앞 무음은 약 60 ms만
-    assert 1.0 + 0.06 + 0.2 < y.size / 44100 < 1.0 + 0.1 + 0.25 + 0.05  # 뒤 무음은 쉼 250 ms만(QWEN_TTS_TAIL_MS)
+    want = config.QWEN_TTS_TAIL_MS / 1000
     tail = (y.size - np.flatnonzero(np.abs(y) > 0.01)[-1]) / 44100
-    assert 0.2 <= tail <= 0.3, tail
-    head = np.abs(y[np.flatnonzero(np.abs(y) > 1e-4)[0]:][:400])   # 15 ms 페이드: 처음 400샘플은 작게 시작
+    assert want - 0.03 <= tail <= want + 0.06, tail        # 뒤 쉼은 QWEN_TTS_TAIL_MS(기본 300 ms)
+    fn = int(44100 * config.QWEN_TTS_FADE_MS / 1000)
+    head = np.abs(y[np.flatnonzero(np.abs(y) > 1e-4)[0]:][:fn + 300])   # 페이드인: 처음은 작게 시작해 페이드 길이 안에 커짐
     assert head[:50].max() < 0.3 and head.max() > 0.5
     assert np.max(np.abs(y)) <= 10 ** (-1 / 20) + 1e-3   # -1 dBFS 넘지 않음
     assert np.max(np.abs(y)) > 0.85                  # 하드 클립이 아니라 눌렀을 뿐
