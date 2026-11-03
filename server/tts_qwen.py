@@ -208,8 +208,9 @@ class QwenPostProcessor:
         self.rs = StreamResampler(sr_in, OUT_RATE)
         self.gain = 10 ** (gain_db / 20)
         self.peak_db = peak_db
-        self.fade_n = max(0, int(OUT_RATE * fade_ms / 1000))  # 문장 시작·끝 페이드(경계의 딱 소리 방지)
-        self._faded_in = self.fade_n == 0
+        self.fade_n = max(0, int(OUT_RATE * fade_ms / 1000))  # 문장 끝 페이드(경계의 딱 소리 방지)
+        self.fade_in_n = max(0, int(OUT_RATE * config.TTS_FADE_IN_MS / 1000))  # 문장 시작 페이드(더 길게)
+        self._faded_in = self.fade_in_n == 0
 
     def _finish(self, y: np.ndarray, last: bool = False) -> np.ndarray:
         if y.size == 0:
@@ -219,7 +220,7 @@ class QwenPostProcessor:
             nz = np.flatnonzero(np.abs(y) > 1e-3)   # 앞에 남긴 무음(lead)은 건너뛰고 소리가 시작되는 곳부터 페이드
             if nz.size:
                 i0 = int(nz[0])
-                n = min(self.fade_n, y.size - i0)
+                n = min(self.fade_in_n, y.size - i0)
                 y = y.copy()
                 y[i0:i0 + n] *= np.linspace(0.0, 1.0, n, endpoint=False, dtype=np.float32)
                 self._faded_in = True

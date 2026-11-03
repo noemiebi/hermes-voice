@@ -812,7 +812,7 @@ class VoiceSession:
                 pre = self._mic_db_between(t0, self._hold_at, config.DUCK_PRE_MIN_WINDOWS)
                 self._duck = {"at": self._hold_at, "pre_db": pre, "exp_db": self.gate.last.expected_db}
             await self.send_json({"type": "hold", "generation": self.generation, "mode": "duck",
-                                  "gain": config.DUCK_GAIN})
+                                  "gain": config.DUCK_GAIN, "ramp_ms": config.DUCK_RAMP_DOWN_MS})
         else:
             self._hold_event.clear()
             self.timeline.stop(self._hold_at)  # 클라이언트가 재생을 멈춤(위치 고정)
@@ -844,7 +844,7 @@ class VoiceSession:
                 self._play_until = max(self._play_until, self._hold_at) + (self.clock() - self._hold_at)
             if self.timeline.gen == gen:
                 self.timeline.resume(self.clock() + RESUME_LEAD_S)
-        await self.send_json({"type": "resume", "generation": gen})
+        await self.send_json({"type": "resume", "generation": gen, "ramp_ms": config.DUCK_RAMP_UP_MS})
         log.info("resume gen %d", gen)
         if self._playing() or not self.queue.empty():
             await self.set_state("speaking")

@@ -173,6 +173,8 @@ curl -s http://127.0.0.1:8480/health
 | `SUPERTONIC_VOICE` | `$SUPERTONIC_DIR/voice_styles/F1.json` | 음색 |
 | `TTS_SPEED` | `1.2` | Supertonic 말 속도 |
 | `TTS_TAIL_MS` / `TTS_FADE_MS` | `300` / `20` | 두 엔진 공통. 문장 끝에 남기는 쉼(ms)과 소리 시작·끝 페이드(ms). 쉼은 속도 신축 뒤에 정확한 길이로 붙음 |
+| `TTS_FADE_IN_MS` | `60` | 문장 시작 페이드(ms). 다음 문장이 갑자기 시작하는 느낌을 줄임 |
+| `DUCK_RAMP_DOWN_MS` / `DUCK_RAMP_UP_MS` | `60` / `250` | 덕킹 검사 때 출력 이득을 내리고 되돌리는 램프(ms). 되돌릴 때를 길게 해 음량이 확 돌아오지 않게 |
 | `TTS_STEPS` | `5` | Supertonic 디노이징 단계 |
 | `TTS_PROVIDER` | `cpu` | `coreml`도 되지만 측정상 CPU가 더 빠름 |
 | `TTS_TARGET_RMS_DB` / `TTS_PEAK_DB` | `-18` / `-1` | 합성 결과 라우드니스 정규화(음성 구간 RMS 목표, 피크 상한) |

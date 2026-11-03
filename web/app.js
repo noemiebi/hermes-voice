@@ -4,7 +4,7 @@
 //   끄려면 Safari 콘솔(또는 웹 검사기)에서 localStorage.setItem('hv.keepalive', '0') 후 새로 고침. 다시 켜려면 removeItem.
 'use strict';
 
-const APP_VERSION = '0.6.6';
+const APP_VERSION = '0.6.7';
 const AGENT_NAME_DEFAULT = 'Herbot'; // 서버 ready의 agent_name이 오면 그걸 쓴다
 const KEEPALIVE_LEVEL = 1e-5; // 약 -100 dBFS
 const DIAG_BUF_MAX = 20; // WS가 닫힌 동안 모아 둘 진단 줄 수
@@ -646,13 +646,13 @@ function outGainValue() {
 }
 
 // 출력 이득을 20 ms 램프로 outGainValue()에 맞춘다(덕킹·복귀용)
-function rampOutGain() {
+function rampOutGain(ms = 20) {
   if (!st.outGain) return;
   const g = st.outGain.gain;
   const t = st.outGain.context.currentTime;
   g.cancelScheduledValues(t);
   g.setValueAtTime(g.value, t);
-  g.linearRampToValueAtTime(outGainValue(), t + 0.02);
+  g.linearRampToValueAtTime(outGainValue(), t + Math.max(0.005, ms / 1000));
 }
 
 function tone(freq, at, dur, vol) {
@@ -948,12 +948,12 @@ function onEvent(m) {
     case 'hold':
       // 서버 잠정 끼어들기. mode duck: 재생은 계속하고 소리만 낮춤(서버가 마이크가 따라 내려가는지 검사).
       // mode 없음·pause: 소리만 즉시 멈추고 남은 오디오는 보관
-      if (m.mode === 'duck') onDuck(m.generation, typeof m.gain === 'number' ? m.gain : 0.3);
+      if (m.mode === 'duck') onDuck(m.generation, typeof m.gain === 'number' ? m.gain : 0.3, typeof m.ramp_ms === 'number' ? m.ramp_ms : 60);
       else onHold(m.generation);
       break;
     case 'resume':
       // 잠정 끼어들기 취소: 보관분을 멈춘 지점부터 이어서
-      onResume(m.generation);
+      onResume(m.generation, m.ramp_ms);
       break;
     case 'interrupt':
       // 서버가 끼어들기를 판정해 재생을 끊음
@@ -1107,23 +1107,23 @@ function onHold(gen) {
 }
 
 // 서버 hold(duck): 재생·위치 보고는 그대로, 출력 이득만 boost×gain으로 20 ms 램프
-function onDuck(gen, gain) {
+function onDuck(gen, gain, rampMs = 60) {
   if (gen !== st.gen || st.deadGens.has(gen) || st.held) return;
   st.duck = { gen, gain: Math.max(0, Math.min(1, gain)) };
-  rampOutGain();
-  console.info('[play] duck', gen, st.duck.gain);
+  rampOutGain(rampMs); // 내릴 때는 빨리(서버 검사가 곧 시작)
+  console.info('[play] duck', gen, st.duck.gain, rampMs);
 }
 
-function clearDuck() {
+function clearDuck(rampMs = 250) {
   if (!st.duck) return;
   st.duck = null;
-  rampOutGain();
+  rampOutGain(rampMs); // 돌아올 때는 천천히(갑작스런 음량 복귀 방지)
 }
 
 // 서버 resume: 덕킹이면 이득 복귀, 일시정지면 보관분을 now+0.06부터 순서대로 이어 붙인다.
-function onResume(gen) {
+function onResume(gen, rampMs) {
   if (st.duck && st.duck.gen === gen) {
-    clearDuck();
+    clearDuck(typeof rampMs === 'number' ? rampMs : 250);
     console.info('[play] unduck', gen);
     return;
   }

@@ -130,7 +130,7 @@ def test_echo_resumes_without_transcript():
         assert len(ws.of("speak_start")) == n_start
         stt.text = "오늘 서울은 맑고 낮 기온은"   # 에코를 받아씀
         await speech_end(s)
-        assert ws.of("resume") == [{"type": "resume", "generation": gen}]
+        assert ws.of("resume") == [{"type": "resume", "generation": gen, "ramp_ms": 250}]
         assert not ws.of("transcript") and not ws.of("interrupt")
         assert s.generation == gen and not s.holding
         await settle()
@@ -178,7 +178,7 @@ def test_short_noise_discard_resumes():
         s, ws, stt, hermes, gen = await setup()
         await barge_start(s)
         await speech_end(s, kind="discard")
-        assert ws.of("resume") == [{"type": "resume", "generation": gen}]
+        assert ws.of("resume") == [{"type": "resume", "generation": gen, "ramp_ms": 250}]
         assert stt.calls == 0 and s.generation == gen
     run(go())
 

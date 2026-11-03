@@ -63,10 +63,10 @@ def test_duck_echo_drop_resumes():
         s, ws, stt, hermes, gen = await setup_duck()
         await hold_now(s)
         h = ws.of("hold")
-        assert h == [{"type": "hold", "generation": gen, "mode": "duck", "gain": config.DUCK_GAIN}]
+        assert h == [{"type": "hold", "generation": gen, "mode": "duck", "gain": config.DUCK_GAIN, "ramp_ms": config.DUCK_RAMP_DOWN_MS}]
         assert s.holding and s._duck is not None
         await feed(s, -52, 576, seed=50)          # 덕킹 뒤 8 dB 하강 -> 에코
-        assert ws.of("resume") == [{"type": "resume", "generation": gen}]
+        assert ws.of("resume") == [{"type": "resume", "generation": gen, "ramp_ms": 250}]
         assert not ws.of("interrupt") and not s.holding and stt.calls == 0
         s.speaker_task.cancel()
     asyncio.run(go())
@@ -99,7 +99,7 @@ def test_duck_end_before_test_uses_stt():
         await s._on_vad(VADEvent("end", pcm=b"\0\0" * 16000, speech_ms=600))
         await settle()
         assert stt.calls == 1
-        assert ws.of("resume") == [{"type": "resume", "generation": gen}] and not ws.of("interrupt")
+        assert ws.of("resume") == [{"type": "resume", "generation": gen, "ramp_ms": 250}] and not ws.of("interrupt")
         await feed(s, -60, 576, seed=80)          # 늦게 온 입력이 검사를 다시 돌리지 않음
         assert len(ws.of("resume")) == 1 and not ws.of("interrupt")
         s.speaker_task.cancel()
@@ -580,7 +580,7 @@ def test_duck_silent_pre_resumes_with_echo_check():
         await hold_with(s, [-180, -180, -180], expected_db=-33.1)
         assert s.holding and s._duck is not None and s._duck["pre_db"] is None
         await feed_until(s, ws, [-38, -38, -38], "resume")
-        assert ws.of("resume") == [{"type": "resume", "generation": gen}]
+        assert ws.of("resume") == [{"type": "resume", "generation": gen, "ramp_ms": 250}]
         assert not ws.of("interrupt") and not s.holding and s._echo_check
         await feed(s, -38, 576, seed=300)          # 이어지는 에코가 끼어들기로 바뀌지 않음
         assert not ws.of("interrupt")
@@ -594,7 +594,7 @@ def test_duck_no_drop_below_expected_is_echo():
         s, ws, stt, hermes, gen = await setup_duck()
         await hold_with(s, [-38, -38, -38], expected_db=-33.1)
         await feed(s, -38, 576, seed=310)
-        assert ws.of("resume") == [{"type": "resume", "generation": gen}]
+        assert ws.of("resume") == [{"type": "resume", "generation": gen, "ramp_ms": 250}]
         assert not ws.of("interrupt") and s._echo_check
         s.speaker_task.cancel()
     asyncio.run(go())
@@ -674,7 +674,7 @@ def test_hold_fuzzy_echo_resumes():
         await s._on_vad(VADEvent("end", pcm=b"\0\0" * 16000, speech_ms=1536))
         await settle()
         assert stt.calls == 1
-        assert ws.of("resume") == [{"type": "resume", "generation": gen}] and not ws.of("interrupt")
+        assert ws.of("resume") == [{"type": "resume", "generation": gen, "ramp_ms": 250}] and not ws.of("interrupt")
         s.speaker_task.cancel()
     asyncio.run(go())
 

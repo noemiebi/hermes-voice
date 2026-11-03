@@ -86,6 +86,8 @@ QWEN_TTS_TSM_TOL_MS = float(os.environ.get("QWEN_TTS_TSM_TOL_MS", "15"))
 # 두 엔진 공통: 문장 끝 쉼과 시작·끝 페이드. QWEN_TTS_*는 옛 이름(호환)
 TTS_TAIL_MS = float(os.environ.get("TTS_TAIL_MS", os.environ.get("QWEN_TTS_TAIL_MS", "300")))
 TTS_FADE_MS = float(os.environ.get("TTS_FADE_MS", os.environ.get("QWEN_TTS_FADE_MS", "20")))
+# 문장 시작 페이드는 더 길게(60 ms): 다음 문장이 "확" 시작하는 느낌을 줄임(2026-11-03 사용자 피드백)
+TTS_FADE_IN_MS = float(os.environ.get("TTS_FADE_IN_MS", "60"))
 QWEN_TTS_TAIL_MS = TTS_TAIL_MS
 QWEN_TTS_FADE_MS = TTS_FADE_MS
 QWEN_TTS_INSTRUCT = os.environ.get("QWEN_TTS_INSTRUCT", "").strip()
@@ -117,6 +119,9 @@ PLAYBACK_REPORT_TIMEOUT_S = float(os.environ.get("PLAYBACK_REPORT_TIMEOUT_S", "1
 # 잠정 끼어들기 방식: duck(재생을 낮춰 마이크가 따라 내려가는지 능동 검사, 기본) | pause(재생 일시정지, 예전 동작)
 HOLD_MODE = os.environ.get("HOLD_MODE", "duck").strip().lower()
 DUCK_GAIN = float(os.environ.get("DUCK_GAIN", "0.2"))  # 실기: 0.3에서 에코 하강 6.2 dB로 임계(6)에 아슬아슬 → 더 깊게(출력 이득 배수, 0.2 ≈ -14 dB)
+# 덕킹 이득 램프(클라이언트에 전달): 내릴 때는 빨리(검사가 곧 시작), 돌아올 때는 천천히(갑작스런 음량 복귀 방지, 2026-11-03)
+DUCK_RAMP_DOWN_MS = int(os.environ.get("DUCK_RAMP_DOWN_MS", "60"))
+DUCK_RAMP_UP_MS = int(os.environ.get("DUCK_RAMP_UP_MS", "250"))
 DUCK_TEST_DELAY_MS = int(os.environ.get("DUCK_TEST_DELAY_MS", "180"))  # hold 뒤 이만큼 지나서부터
 DUCK_TEST_MS = int(os.environ.get("DUCK_TEST_MS", "300"))              # 이 시간 동안 마이크 평균을 잰다
 DUCK_DROP_DB = float(os.environ.get("DUCK_DROP_DB", "6"))              # hold 전보다 이만큼 내려가면 에코

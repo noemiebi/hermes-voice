@@ -173,6 +173,8 @@ Path variables fall back to their defaults when left empty.
 | `SUPERTONIC_VOICE` | `$SUPERTONIC_DIR/voice_styles/F1.json` | Voice |
 | `TTS_SPEED` | `1.2` | Supertonic speaking rate |
 | `TTS_TAIL_MS` / `TTS_FADE_MS` | `300` / `20` | Both engines. Pause kept after each sentence (ms) and fade at the start/end of speech (ms). The pause is appended after time-stretching, so its length is exact |
+| `TTS_FADE_IN_MS` | `60` | Fade-in at the start of each sentence (ms); softens abrupt sentence onsets |
+| `DUCK_RAMP_DOWN_MS` / `DUCK_RAMP_UP_MS` | `60` / `250` | Gain ramps when the duck test lowers and restores playback (ms). The slow restore avoids a sudden jump in volume |
 | `TTS_STEPS` | `5` | Supertonic denoising steps |
 | `TTS_PROVIDER` | `cpu` | `coreml` also works, but CPU measured faster |
 | `TTS_TARGET_RMS_DB` / `TTS_PEAK_DB` | `-18` / `-1` | Loudness normalization of synthesized audio (RMS target over voiced segments, peak ceiling) |

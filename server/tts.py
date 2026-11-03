@@ -60,7 +60,8 @@ def trim_silence(wav: np.ndarray, thresh_db: float = -45.0, lead_s: float = 0.06
 
 
 def shape_sentence(wav: np.ndarray, sr: int = SAMPLE_RATE, tail_ms: float = config.TTS_TAIL_MS,
-                   fade_ms: float = config.TTS_FADE_MS, quiet_db: float = -50.0) -> np.ndarray:
+                   fade_ms: float = config.TTS_FADE_MS, quiet_db: float = -50.0,
+                   fade_in_ms: float = config.TTS_FADE_IN_MS) -> np.ndarray:
     """문장 하나의 끝을 다듬는다: 소리 시작·끝에 fade_ms 페이드, 마지막 소리 뒤 무음이 정확히 tail_ms가 되게 채움.
     (trim_silence가 남긴 꼬리 무음은 그대로 두고 모자란 만큼만 덧붙인다. 문장 사이 쉼이 엔진·속도와 무관하게 일정.)"""
     wav = np.asarray(wav, dtype=np.float32).reshape(-1)
@@ -71,11 +72,13 @@ def shape_sentence(wav: np.ndarray, sr: int = SAMPLE_RATE, tail_ms: float = conf
     if nz.size == 0:
         return wav
     i0, i1 = int(nz[0]), int(nz[-1]) + 1
-    n = max(0, int(sr * fade_ms / 1000))
+    n_in, n_out = max(0, int(sr * fade_in_ms / 1000)), max(0, int(sr * fade_ms / 1000))
     out = wav.copy()
-    if n:
-        k = min(n, i1 - i0)
+    if n_in:
+        k = min(n_in, i1 - i0)
         out[i0:i0 + k] *= np.linspace(0.0, 1.0, k, endpoint=False, dtype=np.float32)
+    if n_out:
+        k = min(n_out, i1 - i0)
         out[i1 - k:i1] *= np.linspace(1.0, 0.0, k, dtype=np.float32)
     pad = int(sr * tail_ms / 1000) - (out.size - i1)
     if pad > 0:
