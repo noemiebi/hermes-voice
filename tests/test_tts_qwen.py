@@ -323,3 +323,100 @@ def test_speaker_pause_hold_waits_duck_continues(tmp_path):
         return paused, resumed, ducked
     paused, resumed, ducked = run(main())
     assert paused == 0 and resumed > 0 and ducked > 0
+
+
+# ---------------------------------------------------------------- 재생 여유 대기·답 단위 목소리 고정
+def requests(log: Path) -> list[str]:
+    return [ln.split(" ", 2)[2] for ln in log.read_text().splitlines() if ln.startswith("req")] if log.exists() else []
+
+
+def test_router_first_chunk_limit():
+    r = TTSRouter(FakeSupertonic(), None, first_chunk_timeout_s=2.5, lead_margin_s=0.5, first_chunk_max_s=12)
+    assert r.first_chunk_limit(0) == 2.5            # 첫 문장(재생 중인 것 없음)
+    assert r.first_chunk_limit(2.0) == 2.5          # 여유가 기본보다 짧으면 기본
+    assert r.first_chunk_limit(5.0) == 4.5          # 남은 재생 - 여유
+    assert r.first_chunk_limit(60.0) == 12          # 상한
+
+
+def test_router_waits_for_playback_lead(tmp_path):
+    # 축척: 기본 0.5 s, 가짜 SLOW 첫 청크 2 s. lead 3 s면 한도 2.5 s라 폴백 안 함(실값으로 lead 5 s·첫 청크 4 s 상당)
+    async def main():
+        eng, _ = make_engine(tmp_path)
+        st = FakeSupertonic()
+        r = TTSRouter(st, eng, engine="qwen", first_chunk_timeout_s=0.5, lead_margin_s=0.5)
+        await r.load()
+        out = [c async for c in r.synth_stream("SLOW 여유", lead_s=3.0, turn_id=1)]
+        await r.aclose()
+        return r, st, out
+    r, st, out = run(main())
+    assert st.calls == [] and r.fallbacks == 0 and len(out) >= 3 and r.last_engine == "qwen"
+
+
+def test_router_no_lead_falls_back(tmp_path):
+    async def main():
+        eng, _ = make_engine(tmp_path)
+        st = FakeSupertonic()
+        r = TTSRouter(st, eng, engine="qwen", first_chunk_timeout_s=0.5, lead_margin_s=0.5)
+        await r.load()
+        out = [c async for c in r.synth_stream("SLOW 첫 문장", lead_s=0.0, turn_id=1)]
+        await r.aclose()
+        return r, st, out
+    r, st, out = run(main())
+    assert st.calls == ["SLOW 첫 문장"] and r.fallbacks == 1 and len(out) == 1
+
+
+def test_router_keeps_supertonic_within_turn(tmp_path):
+    async def main():
+        eng, log = make_engine(tmp_path)
+        st = FakeSupertonic()
+        r = TTSRouter(st, eng, engine="qwen", first_chunk_timeout_s=0.5, lead_margin_s=0.5)
+        await r.load()
+        a = [c async for c in r.synth_stream("SLOW 하나", turn_id=7)]          # 폴백
+        b = [c async for c in r.synth_stream("같은 답 둘", lead_s=9.0, turn_id=7)]  # Qwen 시도 없이 Supertonic
+        mid_reqs = requests(log)
+        c = [c async for c in r.synth_stream("다음 답", lead_s=9.0, turn_id=8)]   # 다시 Qwen
+        eng_c = r.last_engine
+        await r.aclose()
+        return r, st, a, b, c, mid_reqs, eng_c, requests(log)
+    r, st, a, b, c, mid_reqs, eng_c, reqs = run(main())
+    assert st.calls == ["SLOW 하나", "같은 답 둘"]
+    assert len(a) == 1 and len(b) == 1 and len(c) >= 3 and eng_c == "qwen"
+    assert "같은 답 둘" not in mid_reqs and "같은 답 둘" not in reqs and "다음 답" in reqs
+    assert r.fallbacks == 1 and r.fallback_turns == 1   # 유지는 폴백으로 세지 않음
+
+
+def test_speaker_passes_playback_lead(tmp_path):
+    # 첫 문장(길게, 8 s 음성)이 재생 중이면 다음 문장의 느린 첫 청크(2 s)를 기다린다
+    async def main():
+        s, ws, router, st, _ = await make_session(tmp_path, timeout=0.3)
+        s.generation = gen = 1
+        s.queue.put_nowait((gen, "길게 이어지는 첫 문장"))
+        s.queue.put_nowait((gen, "느림 둘째 문장"))
+        for _ in range(600):
+            await asyncio.sleep(0.01)
+            if len(s._sched) == 2 and not s._speaking_now:
+                break
+        s.speaker_task.cancel()
+        await router.aclose()
+        return st, router, list(s._sched)
+    st, router, sched = run(main())
+    assert st.calls == [] and router.fallbacks == 0 and len(sched) == 2
+
+
+def test_speaker_keeps_supertonic_for_rest_of_answer(tmp_path):
+    async def main():
+        s, ws, router, st, log = await make_session(tmp_path, timeout=0.3)
+        s.generation = gen = 1
+        s.queue.put_nowait((gen, "느림 첫 문장"))
+        s.queue.put_nowait((gen, "둘째 문장"))
+        for _ in range(300):
+            await asyncio.sleep(0.01)
+            if len(st.calls) == 2 and not s._speaking_now:
+                break
+        reqs = requests(log)
+        s.speaker_task.cancel()
+        await router.aclose()
+        return st, router, reqs
+    st, router, reqs = run(main())
+    assert st.calls == ["느림 첫 문장", "둘째 문장"] and router.fallbacks == 1 and router.fallback_turns == 1
+    assert not any("둘째" in q for q in reqs)

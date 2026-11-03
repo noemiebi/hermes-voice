@@ -55,7 +55,7 @@ async def health():
         "stt": {"loaded": stt.loaded, "model": stt.model, "load_ms": stt.load_ms, "error": stt.error},
         "tts": {"loaded": tts.loaded, "engine": tts.engine, "provider": tts.provider, "load_ms": tts.load_ms,
                 "error": tts.error, "fallbacks": tts.fallbacks, "fallbacks_10min": tts.recent_fallbacks(),
-                "last_fallback": tts.last_fallback,
+                "last_fallback": tts.last_fallback, "fallback_turns": tts.fallback_turns,
                 "qwen": {"enabled": False, "ready": False} if tts.qwen is None else {"enabled": True,
                     "ready": tts.qwen.ready, "model": config.QWEN_TTS_MODEL, "voice": tts.qwen.voice,
                     "load_ms": tts.qwen.load_ms, "error": tts.qwen.error, "last": tts.qwen.last}},

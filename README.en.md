@@ -160,7 +160,9 @@ Path variables fall back to their defaults when left empty.
 
 | Name | Default | Description |
 |---|---|---|
-| `TTS_ENGINE` | `supertonic` | `qwen` uses Qwen3-TTS streaming with per-sentence Supertonic fallback (requires `.venv-tts`; see "Optional: Qwen3-TTS" below) |
+| `TTS_ENGINE` | `supertonic` | `qwen` uses Qwen3-TTS streaming with per-sentence Supertonic fallback (requires `.venv-tts`; see "Optional: Qwen3-TTS" below). Once a reply falls back, its remaining sentences stay on Supertonic so the voice never changes mid-reply |
+| `QWEN_TTS_LEAD_MARGIN_S` | `0.5` | While earlier sentences are still playing, wait for Qwen's first chunk up to (remaining playback - this value), never less than `QWEN_TTS_FIRST_CHUNK_TIMEOUT_S` (2.5 s) |
+| `QWEN_TTS_FIRST_CHUNK_MAX_S` | `12` | Upper bound (seconds) for that extended wait |
 | `SUPERTONIC_DIR` | `~/.hermes/voice/models/supertonic3` | Folder containing `onnx/` and `voice_styles/` |
 | `SUPERTONIC_MODEL_DIR` | `$SUPERTONIC_DIR/onnx` | |
 | `SUPERTONIC_VOICE` | `$SUPERTONIC_DIR/voice_styles/F1.json` | Voice |

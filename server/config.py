@@ -66,6 +66,9 @@ QWEN_TTS_VOICE = os.environ.get("QWEN_TTS_VOICE", "Sohee")
 QWEN_TTS_PYTHON = os.environ.get("QWEN_TTS_PYTHON", str(ROOT / ".venv-tts" / "bin" / "python"))
 QWEN_TTS_HF_HOME = os.environ.get("QWEN_TTS_HF_HOME") or _HF_HOME_DEFAULT  # 모델은 그 아래 hub/
 QWEN_TTS_FIRST_CHUNK_TIMEOUT_S = float(os.environ.get("QWEN_TTS_FIRST_CHUNK_TIMEOUT_S", "2.5"))
+# 앞 문장이 아직 재생 중이면 첫 청크를 (남은 재생 시간 - LEAD_MARGIN)까지 더 기다린다(상한 FIRST_CHUNK_MAX)
+QWEN_TTS_LEAD_MARGIN_S = float(os.environ.get("QWEN_TTS_LEAD_MARGIN_S", "0.5"))
+QWEN_TTS_FIRST_CHUNK_MAX_S = float(os.environ.get("QWEN_TTS_FIRST_CHUNK_MAX_S", "12"))
 QWEN_TTS_STREAM_INTERVAL = float(os.environ.get("QWEN_TTS_STREAM_INTERVAL", "0.32"))  # 워커 청크 간격(초)
 # 고정 이득: 벤치 샘플(tests/out/voices/qwen3tts-1.7B-8bit_Sohee_1~3.wav) 음성 구간 RMS -21.8/-20.5/-19.2 dBFS
 # -> -18 dBFS 목표 대비 +3.8/+2.5/+1.2 dB, 중앙값 +2.5. 피크는 소프트 리미터로 -1 dBFS 이하.

@@ -160,7 +160,9 @@ curl -s http://127.0.0.1:8480/health
 
 | 이름 | 기본값 | 설명 |
 |---|---|---|
-| `TTS_ENGINE` | `supertonic` | `qwen`이면 Qwen3-TTS 스트리밍 + 문장 단위 Supertonic 폴백(`.venv-tts` 필요, 아래 '선택: Qwen3-TTS') |
+| `TTS_ENGINE` | `supertonic` | `qwen`이면 Qwen3-TTS 스트리밍 + 문장 단위 Supertonic 폴백(`.venv-tts` 필요, 아래 '선택: Qwen3-TTS'). 한 답에서 한 번 폴백하면 그 답의 남은 문장도 Supertonic(답 중간에 목소리가 바뀌지 않게) |
+| `QWEN_TTS_LEAD_MARGIN_S` | `0.5` | 앞 문장이 재생 중이면 Qwen 첫 청크를 (남은 재생 시간 - 이 값)까지 더 기다림(최소 `QWEN_TTS_FIRST_CHUNK_TIMEOUT_S` 2.5초) |
+| `QWEN_TTS_FIRST_CHUNK_MAX_S` | `12` | 위 연장 대기의 상한(초) |
 | `SUPERTONIC_DIR` | `~/.hermes/voice/models/supertonic3` | `onnx/`, `voice_styles/`를 담은 폴더 |
 | `SUPERTONIC_MODEL_DIR` | `$SUPERTONIC_DIR/onnx` | |
 | `SUPERTONIC_VOICE` | `$SUPERTONIC_DIR/voice_styles/F1.json` | 음색 |

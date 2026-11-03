@@ -433,15 +433,26 @@ class TTSRouter:
     """TTS_ENGINE에 따라 문장을 Qwen 스트리밍 또는 Supertonic으로 합성.
 
     qwen: Qwen 워커가 준비 안 됐거나, 첫 청크가 first_chunk_timeout_s 안에 안 오거나, 첫 청크 전에 오류가 나면
-    그 문장은 Supertonic으로 폴백(WARNING). 첫 청크 뒤 오류는 그 문장을 거기서 끝낸다(이미 일부를 보냄)."""
+    그 문장은 Supertonic으로 폴백(WARNING). 첫 청크 뒤 오류는 그 문장을 거기서 끝낸다(이미 일부를 보냄).
+
+    첫 청크 대기 한도 = max(first_chunk_timeout_s, min(lead_s - lead_margin_s, first_chunk_max_s)).
+    lead_s는 호출자가 추정한 '앞 문장 오디오가 클라이언트에서 다 재생되기까지 남은 초'(모르면 0):
+    그동안은 더 기다려도 소리가 끊기지 않는다. 한 답(turn_id) 안에서 한 번 폴백하면 그 답의 남은 문장은
+    Qwen을 시도하지 않고 Supertonic으로 간다(답 중간에 목소리가 오가지 않게). 다음 답부터 다시 Qwen."""
 
     def __init__(self, supertonic, qwen: Optional[QwenTTSEngine] = None, engine: str = "supertonic",
-                 first_chunk_timeout_s: float = config.QWEN_TTS_FIRST_CHUNK_TIMEOUT_S):
+                 first_chunk_timeout_s: float = config.QWEN_TTS_FIRST_CHUNK_TIMEOUT_S,
+                 lead_margin_s: float = config.QWEN_TTS_LEAD_MARGIN_S,
+                 first_chunk_max_s: float = config.QWEN_TTS_FIRST_CHUNK_MAX_S):
         self.supertonic = supertonic
         self.qwen = qwen
         self.engine = engine if (engine == "qwen" and qwen is not None) else "supertonic"
         self.first_chunk_timeout_s = first_chunk_timeout_s
+        self.lead_margin_s = lead_margin_s
+        self.first_chunk_max_s = first_chunk_max_s
         self.fallbacks = 0
+        self.fallback_turns = 0               # 폴백이 난 답 수(turn_id 기준)
+        self._fallback_turn = None            # 마지막으로 폴백한 답의 turn_id
         self._fallback_times: deque = deque(maxlen=1000)
         self.last_fallback: Optional[str] = None
         self.last_engine: Optional[str] = None
@@ -470,37 +481,49 @@ class TTSRouter:
             jobs.append(self.qwen.start())
         await asyncio.gather(*jobs)
 
-    async def synth(self, text: str, is_current: Callable[[], bool] = lambda: True):
+    async def synth(self, text: str, is_current: Callable[[], bool] = lambda: True,
+                    lead_s: float = 0.0, turn_id=None):
         return await self.supertonic.synth(text, is_current)
+
+    def first_chunk_limit(self, lead_s: float = 0.0) -> float:
+        """첫 청크 대기 한도(초). 앞 문장 재생이 남았으면 그만큼(여유 lead_margin_s를 빼고) 더 기다린다."""
+        extra = min(float(lead_s or 0.0) - self.lead_margin_s, self.first_chunk_max_s)
+        return max(self.first_chunk_timeout_s, extra)
 
     def recent_fallbacks(self, window_s: float = 600.0) -> int:
         now = time.monotonic()
         return sum(1 for t in self._fallback_times if now - t <= window_s)
 
-    def _note_fallback(self, reason: str, text: str) -> None:
+    def _note_fallback(self, reason: str, text: str, turn_id=None) -> None:
+        if turn_id is not None and turn_id != self._fallback_turn:
+            self._fallback_turn = turn_id
+            self.fallback_turns += 1
         self.fallbacks += 1
         self._fallback_times.append(time.monotonic())
         self.last_fallback = reason
         log.warning("Qwen TTS 폴백 -> Supertonic (%s): %s", reason, text[:40])
 
-    async def synth_stream(self, text: str, is_current: Callable[[], bool] = lambda: True
-                           ) -> AsyncIterator[np.ndarray]:
+    async def synth_stream(self, text: str, is_current: Callable[[], bool] = lambda: True,
+                           lead_s: float = 0.0, turn_id=None) -> AsyncIterator[np.ndarray]:
         t0 = time.perf_counter()
-        if self.engine == "qwen":
+        if self.engine == "qwen" and turn_id is not None and turn_id == self._fallback_turn:
+            log.info("같은 답이라 Supertonic 유지: %s", text[:40])
+        elif self.engine == "qwen":
             reason = None
+            limit = self.first_chunk_limit(lead_s)
             if self.qwen is None or not self.qwen.ready:
                 reason = f"준비 안 됨: {self.qwen.error if self.qwen else '없음'}"
             else:
                 agen = self.qwen.synth_stream(text, is_current)
                 try:
-                    first = await asyncio.wait_for(agen.__anext__(), self.first_chunk_timeout_s)
+                    first = await asyncio.wait_for(agen.__anext__(), limit)
                 except StopAsyncIteration:
                     first = None
                     if is_current():
                         reason = "빈 출력"
                 except asyncio.TimeoutError:
                     first = None
-                    reason = f"첫 청크 {self.first_chunk_timeout_s:.1f}s 초과"
+                    reason = f"첫 청크 {limit:.1f}s 초과"
                 except Exception as e:  # noqa: BLE001
                     first = None
                     reason = f"오류: {e}"
@@ -521,7 +544,7 @@ class TTSRouter:
                     return
             if not is_current():
                 return
-            self._note_fallback(reason, text)
+            self._note_fallback(reason, text, turn_id)
         res = await self.supertonic.synth(text, is_current)
         if res is None:
             return

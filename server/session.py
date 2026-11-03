@@ -915,7 +915,13 @@ class VoiceSession:
                     await self.set_state("thinking")
         return await self.queue.get()
 
-    async def _speak_stream(self, gen: int, item: str, spoken: str) -> bool:
+    def _play_lead_s(self, gen: int) -> float:
+        """지금부터 이 generation의 이미 보낸 오디오가 클라이언트에서 다 재생되기까지 남은 초(추정).
+        _est_play_end(pos_ms 시간축 또는 보낸 길이 기준 _play_until)로 구한다. TTS 라우터가 이만큼은
+        Qwen 첫 청크를 더 기다려도 소리가 끊기지 않는다고 본다."""
+        return max(0.0, self._est_play_end(gen) - self.clock())
+
+    async def _speak_stream(self, gen: int, item: str, spoken: str, lead_s: float = 0.0) -> bool:
         """문장 하나를 스트리밍 엔진으로 합성하며 청크가 오는 대로 보낸다. 오디오를 보냈으면 True.
 
         문장 전체 pcm을 받아 보내던 경로와 같은 결과가 되게 청크마다 참조 버퍼(aec_ref)·_play_until·
@@ -927,7 +933,8 @@ class VoiceSession:
         first_ms: Optional[int] = None
         total = 0
         st0 = 0.0
-        stream = self.tts.synth_stream(spoken, is_current=lambda g=gen: g == self.generation)
+        stream = self.tts.synth_stream(spoken, is_current=lambda g=gen: g == self.generation,
+                                       lead_s=lead_s, turn_id=gen)
         try:
             async for pcm in stream:
                 if gen != self.generation:
@@ -1003,7 +1010,9 @@ class VoiceSession:
             self._speaking_now = True
             try:
                 if hasattr(self.tts, "synth_stream"):  # 스트리밍 엔진(TTSRouter: Qwen 또는 Supertonic 폴백)
-                    if await self._speak_stream(gen, item, spoken):
+                    # 이 답에서 이미 보낸 오디오가 있을 때만 재생 여유를 센다(_play_until은 이전 답의 값이 남을 수 있음)
+                    lead = self._play_lead_s(gen) if sent_gen == gen else 0.0
+                    if await self._speak_stream(gen, item, spoken, lead_s=lead):
                         sent_gen = gen
                     continue
                 try:
