@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- deploy/install.sh가 __PROJECT_DIR__, __HOME__ 를 치환해 ~/Library/LaunchAgents/hermes-voice.plist 로 쓴다. 직접 고치지 말 것. -->
+<plist version="1.0">
+<dict>
+	<key>Label</key><string>hermes-voice</string>
+	<key>ProgramArguments</key>
+	<array><string>__PROJECT_DIR__/.venv/bin/python</string><string>-m</string><string>server</string></array>
+	<key>WorkingDirectory</key><string>__PROJECT_DIR__</string>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>PORT</key><string>8480</string>
+		<key>PYTHONUNBUFFERED</key><string>1</string>
+		<key>PATH</key><string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+		<key>HF_HUB_OFFLINE</key><string>1</string>
+	</dict>
+	<key>RunAtLoad</key><true/>
+	<key>KeepAlive</key><true/>
+	<key>ThrottleInterval</key><integer>10</integer>
+	<key>StandardErrorPath</key><string>__HOME__/Library/Logs/hermes-voice.log</string>
+	<key>StandardOutPath</key><string>__HOME__/Library/Logs/hermes-voice.log</string>
+</dict>
+</plist>

@@ -1,0 +1,27 @@
+[project]
+name = "hermes-voice"
+version = "0.1.0"
+description = "헤르메스 음성채팅 서버 (로컬 STT mlx-whisper + TTS Supertonic 3)"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "fastapi",
+    "uvicorn[standard]",
+    "websockets",
+    "httpx",
+    "numpy",
+    "mlx-whisper",
+    "onnxruntime",
+    "soundfile",
+    "python-dotenv",
+    "scipy",
+    "audiotsm",   # Qwen TTS 말 속도(WSOLA, 순수 numpy)
+]
+# 핸즈프리 VAD: silero-vad는 torch를 끌어오므로 의존성에 넣지 않고 ONNX 파일만 쓴다.
+#   uv pip install --python .venv/bin/python --no-deps silero-vad
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]

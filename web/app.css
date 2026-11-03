@@ -1,0 +1,395 @@
+/* 헤르메스 음성 — 다크 단일 테마. 크기 12/15/17, 굵기 400/600, 간격 8px 격자, 반경 10px·원형. */
+:root {
+  /* 바탕·표면·테두리 */
+  --bg: #000000; /* 순검정: iOS 홈 화면 앱의 하단 62pt 띠(웹 뷰 바깥, 검정)가 배경과 구분되지 않게 */
+  --surface: #1b1e25;
+  --surface-2: #252932;
+  --border: #2c313b;
+  /* 글자 3단계 */
+  --text: #e8eaee;
+  --text-2: #a3aab7;
+  --text-3: #6d7584;
+  /* 강조색(하나) */
+  --accent: #4f74b8;
+  --on-accent: #ffffff;
+  /* 상태색 5종(채도 낮춤) */
+  --st-wait: #7a8aa3;   /* 대기·말씀하세요: 회청 */
+  --st-listen: #4c9e93; /* 듣는 중: 청록 */
+  --st-think: #b89b6a;  /* 준비 중: 차분한 웜 그레이-앰버(2026-11-02: 노랗게 보인다는 피드백으로 #c4a061에서 낮춤) */
+  --st-speak: #d08a5c;  /* 말하는 중: 따뜻한 주황 */
+  --st-error: #d06a62;  /* 오류·꺼짐: 빨강 */
+  --st-idle: #3a4352;   /* 대화 전 구체: 어두운 회청 */
+  --st-busy: #485264;   /* 받아쓰는 중·생각 중 구체 채움: 대화 전 색보다 한 단계 밝은 중립(앰버는 링·상태 글자에만) */
+  --danger-tint: rgba(208, 106, 98, .18);
+  --end: #b4615b;       /* 종료 버튼: 빨강 계열, 채도 낮춤 */
+  --end-press: #9c5550;
+  /* 반경 */
+  --r: 10px;
+  --r-full: 999px;
+  /* 간격 */
+  --s1: 8px;
+  --s2: 16px;
+  --s3: 24px;
+  --s4: 32px;
+  /* 글자 크기 */
+  --fs-s: 12px;
+  --fs-m: 15px;
+  --fs-l: 17px;
+  /* 모션 */
+  --ease: cubic-bezier(.2, .7, .3, 1);
+  --dur: 160ms;
+  --font: -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "Pretendard", system-ui, sans-serif;
+}
+
+* { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+
+html, body {
+  margin: 0;
+  height: 100%;
+  background: var(--bg);
+  color: var(--text);
+  font: 400 var(--fs-m)/1.45 var(--font);
+  -webkit-font-smoothing: antialiased;
+  -webkit-text-size-adjust: 100%;
+  overscroll-behavior: none;
+}
+
+body {
+  display: flex;
+  flex-direction: column;
+  height: 100dvh; /* v26~v27의 visualViewport 고정 배치는 키보드가 입력칸을 가려 되돌림(2026-11-03) */
+  padding: env(safe-area-inset-top) env(safe-area-inset-right) 0 env(safe-area-inset-left);
+}
+
+button {
+  font: inherit; color: inherit;
+  touch-action: manipulation;
+  -webkit-user-select: none; user-select: none;
+  -webkit-touch-callout: none;
+  cursor: pointer;
+}
+button:disabled { cursor: default; }
+button:focus-visible, input:focus-visible, summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+svg { display: block; flex: none; }
+
+/* ---------- 헤더 ---------- */
+.top {
+  display: flex;
+  align-items: center;
+  gap: var(--s1);
+  padding: 4px var(--s2); /* 위아래 4px: 높이 52px(아이콘 버튼 44px + 8px) */
+  min-height: 52px;
+}
+.brand { flex: 1; min-width: 0; display: flex; flex-direction: column; justify-content: center; }
+.app-name { font-size: var(--fs-m); font-weight: 600; line-height: 1.2; }
+.conn {
+  display: flex; align-items: center; gap: var(--s1); min-width: 0;
+  font-size: var(--fs-s); color: var(--text-3); line-height: 1.3;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.conn .dot { width: 6px; height: 6px; border-radius: var(--r-full); background: var(--text-3); flex: none; transition: background-color var(--dur) var(--ease); }
+.conn.on .dot { background: var(--st-listen); }
+.conn.off .dot { background: var(--st-error); }
+
+/* 알약 세그먼트(설정 시트의 소리 크기·추론 수준). 터치 영역 44px, 보이는 알약은 32px */
+.seg { position: relative; display: flex; height: 44px; align-items: center; }
+.seg::before {
+  content: ""; position: absolute; left: 0; right: 0; top: 6px; bottom: 6px;
+  background: var(--surface); border-radius: var(--r-full);
+}
+.seg-btn {
+  position: relative; z-index: 1;
+  min-width: 56px; height: 44px; padding: 0 var(--s2);
+  border: 0; background: transparent;
+  font-size: var(--fs-m); color: var(--text-2);
+  transition: color var(--dur) var(--ease);
+}
+.seg-btn::before {
+  content: ""; position: absolute; z-index: -1; left: 4px; right: 4px; top: 10px; bottom: 10px;
+  border-radius: var(--r-full); background: transparent;
+  transition: background-color var(--dur) var(--ease);
+}
+.seg-btn.on { color: var(--text); font-weight: 600; }
+.seg-btn.on::before { background: var(--surface-2); }
+
+.icon-btn {
+  display: grid; place-items: center; flex: none;
+  width: 44px; height: 44px; padding: 0;
+  border: 0; border-radius: var(--r-full);
+  background: transparent; color: var(--text-2);
+  transition: background-color var(--dur) var(--ease);
+}
+.icon-btn:active { background: var(--surface); }
+
+/* ---------- 자막 ---------- */
+.log {
+  flex: 1;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  padding: var(--s1) var(--s2) var(--s2);
+  display: flex;
+  flex-direction: column;
+  gap: var(--s1);
+}
+
+.hint { color: var(--text-3); text-align: center; margin: auto var(--s3); font-size: var(--fs-m); }
+
+.msg {
+  max-width: 82%; padding: var(--s1) var(--s2); border-radius: var(--r);
+  font-size: var(--fs-m); line-height: 1.45;
+  white-space: pre-wrap; word-break: break-word; overflow-wrap: anywhere;
+}
+.msg.me { align-self: flex-end; background: var(--accent); color: var(--on-accent); }
+.msg.bot { align-self: flex-start; background: var(--surface); }
+.msg.bot.streaming::after { content: ""; display: inline-block; width: 2px; height: 1em; margin-left: 2px; vertical-align: -2px; background: var(--text-3); }
+.msg .ms { display: block; font-size: var(--fs-s); opacity: .7; margin-top: 2px; font-variant-numeric: tabular-nums; }
+.sys { align-self: center; font-size: var(--fs-s); color: var(--text-3); }
+.sys.err { color: var(--st-error); }
+.chip {
+  align-self: flex-start; display: inline-flex; align-items: center; gap: var(--s1);
+  font-size: var(--fs-s); line-height: 1.3; color: var(--text-2);
+  padding: 4px var(--s1); border: 1px solid var(--border); border-radius: var(--r-full);
+}
+.chip.done { color: var(--text-3); }
+/* 한 턴의 도구 칩 줄: 말풍선 위에 가로로, 넘치면 줄바꿈 */
+.chips { align-self: flex-start; display: flex; flex-wrap: wrap; gap: 6px; max-width: 100%; }
+.chips .chip { align-self: auto; }
+.chip .n { font-size: 11px; color: var(--text-2); font-variant-numeric: tabular-nums; margin-left: -2px; }
+
+/* 헤르메스 타이핑 표시(점 세 개): 투명도만 바뀐다 */
+.msg.bot.typing { display: flex; gap: 6px; align-items: center; padding: var(--s2) var(--s2); }
+.msg.bot.typing i { width: 5px; height: 5px; border-radius: var(--r-full); background: var(--text-2); opacity: .25; animation: hv-typing 1.6s ease-in-out infinite; }
+.msg.bot.typing i:nth-child(2) { animation-delay: .27s; }
+.msg.bot.typing i:nth-child(3) { animation-delay: .53s; }
+@keyframes hv-typing { 0%, 100% { opacity: .25; } 40% { opacity: .85; } }
+
+/* ---------- 하단(구체) ---------- */
+/* 내용 높이만큼만 차지하고 화면 아래에 붙는다. 남는 높이는 위 자막 영역(.log, flex:1)이 가져간다. */
+.dock {
+  --c: var(--st-idle);
+  --orb-stage: 140px; /* 구체 120px + 반응 링 여유(1.16배) */
+  --orb: 120px;
+  --orb-small: .7467; /* 약 90 / 120: 대화 전 크기 */
+  flex: none;
+  padding: 0 var(--s2) calc(4px + env(safe-area-inset-bottom));
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+}
+.dock[data-state="waiting"] { --c: var(--st-wait); }
+.dock[data-state="listening"] { --c: var(--st-listen); }
+.dock[data-state="transcribing"], .dock[data-state="thinking"] { --c: var(--st-busy); }
+.dock[data-state="speaking"] { --c: var(--st-speak); }
+/* 마이크 끔: 말씀하세요 상태의 구체는 회청 대신 어두운 색(안에 마이크-사선 아이콘) */
+.dock.mic-muted[data-state="waiting"] { --c: var(--st-idle); }
+
+/* 구체 = 시작(대화 전) / 끼어들기(대화 중) */
+.talk {
+  position: relative; display: block;
+  border: 0; background: transparent; padding: 0; border-radius: var(--r-full);
+  touch-action: none;
+}
+.talk:disabled { opacity: .5; }
+
+.orb-stage { position: relative; display: block; width: var(--orb-stage); height: var(--orb-stage); pointer-events: none; }
+.orb-core, .orb-ring, .orb-pulse {
+  position: absolute; left: 50%; top: 50%;
+  width: var(--orb); height: var(--orb); margin: calc(var(--orb) / -2) 0 0 calc(var(--orb) / -2);
+  border-radius: var(--r-full);
+}
+.orb-core {
+  background-color: var(--c);
+  box-shadow: inset 0 -10px 24px rgba(0, 0, 0, .18); /* 은은한 내부 음영 하나 */
+  scale: 1;
+  will-change: transform;
+  transition: scale 220ms ease-out, background-color 220ms ease-out;
+}
+.orb-ring { border: 1.5px solid var(--c); opacity: 0; will-change: transform; transition: border-color 220ms ease-out; }
+/* 시작 순간 한 번 퍼지는 얇은 링 */
+.orb-pulse { border: 1.5px solid var(--st-wait); opacity: 0; }
+.orb-pulse.go { animation: hv-pulse 400ms ease-out; }
+@keyframes hv-pulse { from { opacity: .6; transform: scale(.75); } to { opacity: 0; transform: scale(1.14); } }
+
+.orb-icon {
+  position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%);
+  color: #fff; opacity: 0; transition: opacity 120ms ease-out;
+}
+
+/* 작은 구체: 대화 전(대기·멈춤), 누르고 말하기의 쉬는 동안 */
+.dock.small .orb-core { scale: var(--orb-small); }
+.dock.small .orb-icon.mic { opacity: 1; }
+.dock.small .orb-stage { animation: hv-breathe 3s ease-in-out infinite alternate; } /* 6초 주기 0.7↔1.0 */
+@keyframes hv-breathe { from { opacity: 1; } to { opacity: .7; } }
+.dock.mic-muted[data-state="waiting"] .orb-icon.mic-off { opacity: .55; }
+
+/* 받아쓰는 중·생각 중: 구체 바깥 4px에 2px 링, 짧은 호(받아쓰기 50° / 생각 90°)가 천천히 돈다.
+   구체 자체의 호흡(0.97↔1.03, 3.2초)은 app.js animFrame이 맡는다. */
+.orb-sweep {
+  --arc: 90deg;
+  position: absolute; left: 50%; top: 50%;
+  width: calc(var(--orb) + 12px); height: calc(var(--orb) + 12px); /* 4px 간격 + 2px 두께, 양쪽(호흡 1.03배에도 안 닿게) */
+  margin: calc((var(--orb) + 12px) / -2) 0 0 calc((var(--orb) + 12px) / -2);
+  border-radius: var(--r-full);
+  /* 꼬리(투명)에서 앞머리(앰버 100%)로 밝아지고 앞머리 뒤는 바로 끊긴다: 밝은 쪽이 분명히 보이게 */
+  background: conic-gradient(transparent 0deg, var(--st-think) var(--arc), transparent calc(var(--arc) + .5deg), transparent 360deg);
+  -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 2px), #000 calc(100% - 2px));
+  mask: radial-gradient(farthest-side, transparent calc(100% - 2px), #000 calc(100% - 2px));
+  opacity: 0;
+  transition: opacity var(--dur) var(--ease);
+}
+.dock[data-state="transcribing"] .orb-sweep { --arc: 50deg; }
+.dock[data-state="transcribing"] .orb-sweep, .dock[data-state="thinking"] .orb-sweep {
+  opacity: .85;
+  animation: hv-sweep 2.4s linear infinite;
+}
+.dock.small .orb-sweep { scale: var(--orb-small); }
+@keyframes hv-sweep { to { transform: rotate(360deg); } }
+
+/* 마이크 끔 · 소리 끔 · 종료: 구체 아래 한 줄 원형 버튼 */
+.ctl-row { display: flex; justify-content: center; gap: var(--s3); }
+.ctl-btn {
+  display: grid; place-items: center; flex: none;
+  width: 48px; height: 48px; padding: 0;
+  border: 1px solid var(--border); border-radius: var(--r-full);
+  background: transparent; color: var(--text-2);
+  transition: background-color 120ms ease-out, border-color 120ms ease-out, color 120ms ease-out, opacity 120ms ease-out;
+}
+.ctl-btn[hidden] { display: none; }
+.ctl-btn .slash { opacity: 0; transition: opacity var(--dur) var(--ease); }
+.ctl-btn.off { background: var(--danger-tint); border-color: transparent; color: var(--st-error); }
+.ctl-btn.off .slash { opacity: 1; }
+.ctl-btn.off .wave { opacity: 0; }
+.ctl-btn:disabled { opacity: .35; }
+.ctl-btn:not(:disabled):active { background: var(--surface); }
+.ctl-btn.off:not(:disabled):active { background: var(--danger-tint); }
+.ctl-btn.end { background: var(--end); border-color: transparent; color: #fff; }
+.ctl-btn.end:not(:disabled):active { background: var(--end-press); }
+
+/* 파형 막대 / 자막으로만 */
+.meter { height: 16px; display: flex; align-items: center; justify-content: center; }
+.bars { display: flex; gap: 3px; align-items: center; height: 16px; }
+.bars i {
+  display: block; width: 3px; height: 16px; border-radius: var(--r-full); background: var(--c);
+  transform: scaleY(.15); opacity: .9; transition: background-color 240ms var(--ease); will-change: transform;
+}
+.bars.silent { opacity: .35; }
+.bars[hidden] { display: none; }
+
+.status-row { display: flex; align-items: center; justify-content: center; height: 16px; max-width: 100%; } /* 고정 높이: 상태가 바뀌어도 안 튄다 */
+.status {
+  font-size: var(--fs-s); line-height: 16px; color: var(--text-2); font-variant-numeric: tabular-nums;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  transition: color var(--dur) var(--ease);
+}
+.status.waiting { color: var(--st-wait); }
+.status.listening { color: var(--st-listen); }
+.status.transcribing, .status.thinking { color: var(--st-think); }
+.status.speaking { color: var(--st-speak); }
+
+/* 글 입력칸(설정에서 켤 때만) */
+.text-form { display: flex; gap: var(--s1); width: 100%; margin-top: 4px; }
+.text-form[hidden] { display: none; }
+.text-form input {
+  flex: 1; min-width: 0; height: 44px;
+  background: var(--surface); border: 1px solid var(--border); color: var(--text);
+  border-radius: var(--r-full); padding: 0 var(--s2);
+  font: 400 var(--fs-l) var(--font); /* 17px: iOS 확대 방지(16px 이상) */
+}
+.text-form input::placeholder { color: var(--text-3); }
+.text-form button {
+  display: grid; place-items: center; flex: none;
+  width: 44px; height: 44px; padding: 0; border: 0; border-radius: var(--r-full);
+  background: var(--accent); color: var(--on-accent);
+}
+
+/* 설정 시트: 접속 토큰(입력칸이 길어 두 줄로) */
+.sheet-item.token-item { flex-direction: column; align-items: stretch; gap: var(--s1); cursor: default;
+  -webkit-user-select: auto; user-select: auto; padding-top: var(--s2); padding-bottom: var(--s2); }
+.token-row { display: flex; gap: var(--s1); }
+.token-row input {
+  flex: 1; min-width: 0; height: 44px;
+  background: var(--bg); border: 1px solid var(--border); color: var(--text);
+  border-radius: var(--r); padding: 0 var(--s2);
+  font: 400 var(--fs-l) var(--font); /* 17px: iOS 확대 방지 */
+}
+.token-row input::placeholder { color: var(--text-3); }
+.token-item.need .token-row input { border-color: var(--accent); }
+.token-save {
+  flex: none; height: 44px; padding: 0 var(--s2); border: 0; border-radius: var(--r);
+  background: var(--accent); color: var(--on-accent); font: 600 var(--fs-m) var(--font);
+}
+
+/* ---------- 알림 ---------- */
+.toast {
+  position: fixed; left: 50%; top: calc(64px + env(safe-area-inset-top)); transform: translateX(-50%);
+  width: max-content; max-width: calc(100% - var(--s4));
+  background: var(--surface-2); color: var(--text); border: 1px solid var(--border);
+  padding: var(--s1) var(--s2); border-radius: var(--r);
+  font-size: var(--fs-m); z-index: 20; white-space: pre-wrap;
+  animation: hv-fade var(--dur) var(--ease);
+}
+@keyframes hv-fade { from { opacity: 0; } to { opacity: 1; } }
+
+/* ---------- 설정: 바텀 시트 ---------- */
+.sheet {
+  position: fixed; inset: 0; z-index: 10;
+  background: rgba(0, 0, 0, .5);
+  display: flex; align-items: flex-end;
+  animation: hv-fade var(--dur) var(--ease);
+}
+.sheet[hidden] { display: none; }
+.sheet-body {
+  width: 100%; max-height: 88dvh; overflow-y: auto; overscroll-behavior: contain;
+  background: var(--surface); border-radius: var(--r) var(--r) 0 0;
+  padding: var(--s1) var(--s2) calc(var(--s2) + env(safe-area-inset-bottom));
+  box-shadow: 0 -8px 24px rgba(0, 0, 0, .35);
+  animation: hv-up var(--dur) var(--ease);
+}
+@keyframes hv-up { from { transform: translateY(24px); opacity: 0; } to { transform: none; opacity: 1; } }
+.sheet-grip { width: 40px; height: 4px; border-radius: var(--r-full); background: var(--border); margin: 0 auto var(--s1); }
+.sheet-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: var(--s1); }
+.sheet-title { font-size: var(--fs-l); font-weight: 600; }
+.sheet-group { background: var(--surface-2); border-radius: var(--r); margin-bottom: var(--s2); overflow: hidden; }
+.sheet-item {
+  display: flex; gap: var(--s2); align-items: center; justify-content: space-between;
+  width: 100%; min-height: 56px; padding: var(--s1) var(--s2);
+  border: 0; background: transparent; text-align: left;
+  font-size: var(--fs-m); color: var(--text);
+  -webkit-user-select: none; user-select: none; -webkit-touch-callout: none;
+  touch-action: manipulation; cursor: pointer;
+}
+.sheet-item + .sheet-item { border-top: 1px solid var(--border); }
+.sheet-text { flex: 1; min-width: 0; }
+.sheet-text small { display: block; margin-top: 2px; color: var(--text-3); font-size: var(--fs-s); line-height: 1.4; }
+/* 설정 시트 안 세그먼트(소리 크기·추론 수준): 시트 배경 위에서 보이게 한 단계 어둡게 */
+.sheet .seg::before { background: var(--bg); }
+.sheet .seg-btn { min-width: 52px; padding: 0 var(--s1); font-variant-numeric: tabular-nums; }
+
+/* 토글 스위치 */
+.switch {
+  appearance: none; -webkit-appearance: none; flex: none; margin: 0;
+  position: relative; width: 48px; height: 28px; border-radius: var(--r-full);
+  background: #3a404b; cursor: pointer;
+  transition: background-color var(--dur) var(--ease);
+}
+.switch::before {
+  content: ""; position: absolute; left: 2px; top: 2px; width: 24px; height: 24px; border-radius: var(--r-full);
+  background: #fff; transition: transform var(--dur) var(--ease);
+}
+.switch:checked { background: var(--accent); }
+.switch:checked::before { transform: translateX(20px); }
+
+.sheet-info { font-size: var(--fs-s); color: var(--text-3); padding: 0 var(--s1) calc(var(--s1) + env(safe-area-inset-bottom, 0px)); }
+.sheet-info summary { min-height: 44px; display: flex; align-items: center; justify-content: center; cursor: pointer; font-variant-numeric: tabular-nums; list-style: none; }
+.sheet-info summary::-webkit-details-marker { display: none; }
+.sheet-info div { white-space: pre-wrap; padding-bottom: var(--s1); font-variant-numeric: tabular-nums; }
+.sheet-ver { font-size: var(--fs-s); color: var(--text-3); text-align: center; padding: var(--s2) var(--s1) 0; font-variant-numeric: tabular-nums; }
+
+@media (prefers-reduced-motion: reduce) {
+  .msg.bot.typing i { animation: none; opacity: .7; }
+  .bars i, .switch, .switch::before { transition: none; } /* 구체·버튼 전환(크기·색·투명도)은 남긴다 */
+  .dock.small .orb-stage, .orb-pulse.go { animation: none; }
+  .dock[data-state="transcribing"] .orb-sweep, .dock[data-state="thinking"] .orb-sweep { animation: none; opacity: .4; }
+  .sheet, .sheet-body, .toast { animation: none; }
+}

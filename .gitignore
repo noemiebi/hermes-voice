@@ -1,0 +1,16 @@
+.env
+.venv/
+__pycache__/
+*.pyc
+node_modules/
+*.log
+.DS_Store
+models/
+tests/clips/
+.venv-tts/
+.venv-bench/
+extras/clips-review/
+tests/out/
+extras/**/*.wav
+extras/
+docs/설계안-작업일지.md
