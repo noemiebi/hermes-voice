@@ -243,7 +243,7 @@ curl -s http://127.0.0.1:8480/health
 | `server/tts.py` | TTS 상주(단일 스레드), 엔진 선택·폴백·라우드니스 정규화 |
 | `server/supertonic_helper.py` | Supertonic 추론 코드(MIT, `server/SUPERTONIC_CODE_LICENSE.txt`) |
 | `server/tts_qwen.py`, `server/qwen_tts_worker.py` | Qwen3-TTS(기본) 워커 연결·엔진 선택·폴백과 워커 본체 |
-| `server/tts_text.py`, `server/tts_lexicon.tsv` | 합성 직전 독음 정규화와 기본 사전 |
+| `server/tts_text.py`, `server/tts_lexicon.tsv` | 합성 직전 독음 정규화와 기본 사전(횟수·개수 단위 앞 숫자는 고유어 수사로: "4번"→"네 번", "11시"→"열한 시") |
 | `server/vad.py` | Silero VAD ONNX 스트리밍 래퍼(`SileroVAD`), 말 시작·끝 판정(`Endpointer`) |
 | `server/smart_turn.py` | (선택) Smart Turn v3 ONNX, numpy log-mel(pipecat에서 가져옴, BSD-2/Apache-2.0 표기) |
 | `server/echo.py`, `server/aec_gate.py` | 스피커 에코 판정 |

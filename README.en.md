@@ -243,7 +243,7 @@ If memory is tight or you would rather not install Qwen3-TTS, add `TTS_ENGINE=su
 | `server/tts.py` | Resident TTS (single thread), engine selection, fallback, loudness normalization |
 | `server/supertonic_helper.py` | Supertonic inference code (MIT, `server/SUPERTONIC_CODE_LICENSE.txt`) |
 | `server/tts_qwen.py`, `server/qwen_tts_worker.py` | Qwen3-TTS (default) worker connection, engine selection and fallback, and the worker itself |
-| `server/tts_text.py`, `server/tts_lexicon.tsv` | Pronunciation normalization right before synthesis, and the built-in lexicon |
+| `server/tts_text.py`, `server/tts_lexicon.tsv` | Pronunciation normalization right before synthesis, and the built-in lexicon (numbers before Korean counters use native Korean numerals: "4번" -> "네 번", "11시" -> "열한 시") |
 | `server/vad.py` | Silero VAD ONNX streaming wrapper (`SileroVAD`), speech start/end detection (`Endpointer`) |
 | `server/smart_turn.py` | (Optional) Smart Turn v3 ONNX, numpy log-mel (taken from pipecat, BSD-2/Apache-2.0 notices) |
 | `server/echo.py`, `server/aec_gate.py` | Speaker echo detection |

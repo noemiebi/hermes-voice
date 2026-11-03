@@ -4,7 +4,7 @@
 //   끄려면 Safari 콘솔(또는 웹 검사기)에서 localStorage.setItem('hv.keepalive', '0') 후 새로 고침. 다시 켜려면 removeItem.
 'use strict';
 
-const APP_VERSION = '0.6.0';
+const APP_VERSION = '0.6.1';
 const AGENT_NAME_DEFAULT = 'Herbot'; // 서버 ready의 agent_name이 오면 그걸 쓴다
 const KEEPALIVE_LEVEL = 1e-5; // 약 -100 dBFS
 const DIAG_BUF_MAX = 20; // WS가 닫힌 동안 모아 둘 진단 줄 수
@@ -136,6 +136,16 @@ const st = {
   capStartAt: 0, // 마지막 captureCmd('start') 시각(감시 기준점)
   micWatch: 0, // 시작 직후 1.5초 감시 타이머
   micFix: null, // 진행 중인 프레임 복구 Promise
+  // 멈춘 컨텍스트(running인데 렌더링 정지) 재생성(전송 감시 3단계)
+  convRebuilds: 0, // 이번 대화에서 새로 만든 컨텍스트 수(최대 CTX_REBUILD_MAX)
+  ctxRebuildSeq: 0, // 로그용 재생성 번호(#n)
+  ctxStalled: false, // 복귀 점검에서 currentTime이 안 늘었음 → 다음 대화 시작 때 바로 재생성
+  ctxPending: false, // 재생성한 컨텍스트가 제스처 없이 깨어나지 않음 → 다음 구체 탭에서 다시 재생성
+  micNote: '', // 상태줄 안내(마이크 멈춤). 비어 있으면 평소 문구
+  lastLevelAt: 0, // 워클릿 레벨 보고(빈 입력 포함)를 마지막으로 받은 시각: process()가 도는지
+  ctWatch: 0, // 대화 시작 0.6초 뒤 currentTime 정지 검사 타이머
+  diagCtx: null, // 2초 진단의 지난 컨텍스트·currentTime(ct 증가분 계산)
+  diagCt: 0,
   stallTried: false, // 대화 중 10초 무프레임 복구를 이번 대화에서 이미 시도했나
   emptyN: 0, // 워클릿 입력 채널이 비어 있던 레벨 보고 수(진단용)
   chat: { session: null, items: [] }, // 화면 기록 보존(hv.log)
@@ -310,6 +320,7 @@ function trackTurn(s) {
 
 function statusText(s) {
   if (st.authFail) return '접속 토큰이 필요합니다';
+  if (st.micNote) return st.micNote;
   if (st.convStarting) return '마이크 준비 중';
   if (s === 'idle' && st.convPaused && !st.ptt && !st.conv) return '탭해서 다시 시작';
   if (s === 'listening' && st.ptt && st.toggleMode) return '듣는 중 · 다시 누르면 끝';
@@ -1216,6 +1227,137 @@ async function recoverContext() {
   // 마이크 그래프(워크렛)는 recoverMic이 새 컨텍스트에 다시 잇는다
 }
 
+// ---------- 멈춘 컨텍스트 재생성(전송 감시 3단계) ----------
+// iOS WebKit은 오디오 세션 중단(끝내기 → 백그라운드 → 복귀) 뒤 AudioContext를 running으로 두면서
+// 그래프를 돌리지 않는 일이 있다(2026-11-03 17:46 실기: ctx running·track live인데 워클릿 process()가
+// 한 번도 안 불림, 빈 입력 0, 새 트랙도 같음). 이때는 컨텍스트를 버리고 새로 만들어야 한다.
+const CTX_REBUILD_MAX = 2; // 대화당
+const NOTE_TAP = '구체를 한 번 더 눌러 주세요';
+const NOTE_DEAD = '마이크가 멈췄습니다. 앱을 닫았다 다시 여세요';
+
+function setMicNote(txt) {
+  if (st.micNote === txt) return;
+  st.micNote = txt;
+  render();
+}
+
+// ms 동안 ctx.currentTime 증가분(초). 그 사이 컨텍스트가 바뀌거나 running이 아니면 null.
+async function ctAdvance(ms) {
+  const ctx = st.ctx;
+  if (!ctx || ctx.state !== 'running') return null;
+  const a = ctx.currentTime;
+  await new Promise((r) => setTimeout(r, ms));
+  if (st.ctx !== ctx || ctx.state !== 'running') return null;
+  return ctx.currentTime - a;
+}
+
+// 옛 컨텍스트를 닫고 새 컨텍스트에 재생 체인(ensureOutput: outBus→analyser→outGain→limiter, earBus)과
+// keep-alive를 다시 만든다. 동기 함수라 탭 핸들러 안에서 부르면 제스처 안에서 만들어지고 resume된다.
+// 재생 큐(hold 보관분 포함)는 비운다. 캡처 그래프(워크렛 모듈 포함)는 다음 ensureMic이 새 컨텍스트에 만든다.
+function swapContext(why) {
+  const old = st.ctx;
+  const n = ++st.ctxRebuildSeq;
+  diag(`[mic] 컨텍스트 재생성 #${n} (${why}) 옛 ctx ${old ? `${old.state} ct ${old.currentTime.toFixed(3)}` : '-'}`, 'warn');
+  stopPlayback();
+  disconnectCapture();
+  stopKeepAlive();
+  st.outBus = st.analyser = st.outGain = st.limiter = st.earBus = null;
+  st.ctx = null;
+  if (old) {
+    old.onstatechange = null;
+    try { old.close().catch(() => {}); } catch { /* 이미 닫힘 */ }
+  }
+  const fresh = newContext(); // ensureOutput 포함. 옵션은 기존 newContext와 같음(기기 기본 샘플레이트)
+  try { fresh.resume().catch(() => {}); } catch { /* */ }
+  if (st.conv) startKeepAlive();
+  st.ctxStalled = false;
+  st.ctxPending = false;
+  st.diagCtx = null;
+  return fresh;
+}
+
+// 새 컨텍스트에 캡처 그래프를 붙이고 전송을 다시 켠 뒤 pcm 프레임을 기다린다.
+async function attachAndWait(alive) {
+  const t = performance.now();
+  try {
+    await ensureMic();
+  } catch (e) {
+    diag(`[mic] 새 컨텍스트 캡처 그래프 실패 ${e && e.name} ${e && e.message}`, 'warn');
+  }
+  if (!alive()) return false;
+  setTrackEnabled(true);
+  captureCmd('start');
+  if (await waitPcm(t, MIC_WATCH_MS, alive)) {
+    diag(`[mic] 프레임 복구됨(새 컨텍스트), ${micDesc()}`);
+    setMicNote('');
+    return true;
+  }
+  if (alive()) {
+    const ctx = st.ctx;
+    diag(`[mic] 새 컨텍스트도 프레임 없음, 레벨 보고 ${st.lastLevelAt >= t ? '있음' : '없음'}, ct ${ctx ? ctx.currentTime.toFixed(3) : '-'}, ${micDesc()}`, 'warn');
+  }
+  return false;
+}
+
+// 3단계 한 번: 새 컨텍스트 → resume(1.5초) → 캡처 그래프 → 프레임 확인.
+// resume이 안 되면(제스처 밖) 상태줄에 탭 안내를 띄우고 다음 구체 탭에서 다시 만든다(runPendingRebuild).
+async function rebuildContext(why, alive) {
+  if (st.convRebuilds >= CTX_REBUILD_MAX) {
+    diag(`[mic] 컨텍스트 재생성 한도(${CTX_REBUILD_MAX}회) 도달, ${micDesc()}`, 'warn');
+    setMicNote(NOTE_DEAD);
+    return false;
+  }
+  st.convRebuilds++;
+  const ctx = swapContext(why);
+  try { await withTimeout(ctx.resume(), 1500); } catch { /* */ }
+  if (!alive() || st.ctx !== ctx) return false;
+  if (ctx.state !== 'running') {
+    st.ctxPending = true;
+    diag(`[mic] 새 컨텍스트 ${ctx.state}: 제스처가 필요해 다음 탭에서 재생성`, 'warn');
+    setMicNote(NOTE_TAP);
+    return false;
+  }
+  return attachAndWait(alive);
+}
+
+// 3단계: 대화당 CTX_REBUILD_MAX번까지. 다 실패하면 앱을 다시 열라고 안내.
+async function contextStage(why, alive) {
+  while (alive()) {
+    if (await rebuildContext(why, alive)) return true;
+    if (!alive() || st.ctxPending) return false;
+    if (st.convRebuilds >= CTX_REBUILD_MAX) {
+      setMicNote(NOTE_DEAD);
+      toast(NOTE_DEAD, 7000);
+      return false;
+    }
+  }
+  return false;
+}
+
+// 대기 중인 재생성(제스처 필요)을 구체 탭 안에서 실행한다. 컨텍스트는 탭 핸들러 안에서 동기로 만든다.
+function runPendingRebuild() {
+  const seq = st.convSeq;
+  const alive = () => st.conv && st.convSeq === seq && !st.micMuted;
+  const ctx = swapContext('탭: 대기 중 재생성');
+  setMicNote('');
+  st.micFix = (async () => {
+    try { await withTimeout(ctx.resume(), 1500); } catch { /* */ }
+    if (!alive() || st.ctx !== ctx) return;
+    if (ctx.state !== 'running') {
+      st.ctxPending = true;
+      diag(`[mic] 탭으로 만든 컨텍스트도 ${ctx.state}`, 'warn');
+      setMicNote(NOTE_TAP);
+      return;
+    }
+    if (await attachAndWait(alive)) return;
+    if (alive()) await contextStage('탭 재생성 뒤에도 프레임 없음', alive);
+  })().catch((e) => diag(`[mic] 탭 재생성 오류 ${e && e.name} ${e && e.message}`, 'warn')).finally(() => {
+    st.micFix = null;
+    render();
+  });
+  return st.micFix;
+}
+
 function micTrack() {
   return st.stream ? st.stream.getAudioTracks()[0] || null : null;
 }
@@ -1397,6 +1539,7 @@ function onCaptureMsg(m) {
       render();
     }
   } else if (m.type === 'level') {
+    st.lastLevelAt = performance.now();
     st.diagSq += m.rms * m.rms;
     st.diagN++;
     if (m.empty) st.emptyN++; // 빈 입력은 무음 트랙 검사 대신 전송 감시(pcm 무프레임)가 처리
@@ -1484,6 +1627,13 @@ function abortListening() {
 async function startConversation(why = '') {
   if (st.conv || st.convStarting) return;
   diag(`[conv] 시작 요청(${why || '-'}), ws ${st.wsOpen ? 'open' : 'closed'}, ctx ${st.ctx ? st.ctx.state : '-'}`);
+  st.convRebuilds = 0;
+  st.micNote = '';
+  // 복귀 점검에서 멈춘 컨텍스트로 표시됐거나 재생성이 탭을 기다리면 제스처 안에서 바로 새로 만든다
+  if (st.ctx && (st.ctxStalled || st.ctxPending)) {
+    st.convRebuilds = 1;
+    swapContext(st.ctxPending ? '대화 시작: 대기 중 재생성' : '대화 시작: 복귀 때 ct 정지');
+  }
   const ctx = ensureContext(); // 제스처 안에서 동기로(resume 포함)
   if (!st.wsOpen) {
     toast('서버에 연결되지 않았어요. 다시 연결하는 중이에요.');
@@ -1538,6 +1688,8 @@ async function startConversation(why = '') {
 function resetConvState() {
   clearTimeout(st.micWatch);
   st.micWatch = 0;
+  clearTimeout(st.ctWatch);
+  st.ctWatch = 0;
   st.zeroTriedAt = 0;
   st.zeroSince = 0;
   st.stallTried = false;
@@ -1577,6 +1729,8 @@ function stopConversation(why = '') {
 // 시작 뒤 1.5초 안에 워클릿 pcm 프레임이 하나도 없으면
 //  1단계: 컨텍스트를 깨우고(안 되면 새 컨텍스트) 캡처 그래프를 다시 만든다
 //  2단계: 그래도 1.5초 안에 없으면 트랙을 버리고 다시 받는다(권한 창이 뜰 수 있음)
+//  3단계: 새 트랙에도 1.5초 안에 레벨 보고(빈 입력 포함)가 없으면 컨텍스트 렌더링이 멈춘 것으로 보고
+//         컨텍스트를 새로 만든다(대화당 최대 2회). running인데 currentTime이 0.5초 넘게 안 늘면 바로 3단계.
 // 대화 중에도 보내야 할 때(micSending) 10초 넘게 프레임이 없으면 같은 복구를 한 번 한다.
 const MIC_WATCH_MS = 1500;
 const MIC_STALL_MS = 10000;
@@ -1596,17 +1750,29 @@ function micDesc() {
 
 function armMicWatch() {
   clearTimeout(st.micWatch);
+  clearTimeout(st.ctWatch);
   const t0 = performance.now();
   st.micWatch = setTimeout(() => {
     st.micWatch = 0;
     if (st.conv && !st.micMuted && st.lastPcmAt < t0) fixMic('시작 뒤 1.5초');
   }, MIC_WATCH_MS);
+  // running인데 0.6초 동안 currentTime이 그대로면 1.5초를 기다리지 않고 바로 새 컨텍스트로
+  const ctx0 = st.ctx;
+  const ct0 = ctx0 ? ctx0.currentTime : 0;
+  st.ctWatch = setTimeout(() => {
+    st.ctWatch = 0;
+    if (!st.conv || st.micMuted || st.micFix || st.ctx !== ctx0 || !ctx0 || ctx0.state !== 'running') return;
+    if (ctx0.currentTime > ct0 || playing() || st.lastLevelAt >= t0) return;
+    clearTimeout(st.micWatch);
+    st.micWatch = 0;
+    fixMic('시작 뒤 ct 정지 0.6초', true);
+  }, 600);
 }
 
-function fixMic(why) {
+function fixMic(why, frozen = false) {
   if (st.micFix) return st.micFix;
   diag(`[mic] fixMic(${why})`, 'warn');
-  st.micFix = runMicFix(why).catch((e) => diag(`[mic] 복구 오류 ${e && e.name} ${e && e.message}`, 'warn')).finally(() => {
+  st.micFix = runMicFix(why, frozen).catch((e) => diag(`[mic] 복구 오류 ${e && e.name} ${e && e.message}`, 'warn')).finally(() => {
     st.micFix = null;
     render();
   });
@@ -1624,10 +1790,21 @@ async function waitPcm(t, ms, alive) {
   return st.lastPcmAt >= t;
 }
 
-async function runMicFix(why) {
+async function runMicFix(why, frozen = false) {
   const seq = st.convSeq;
   const alive = () => st.conv && st.convSeq === seq && !st.micMuted;
   if (!alive()) return;
+  // 컨텍스트 시간이 멈췄으면(running인데 0.5초 동안 currentTime 그대로) 1·2단계는 소용없다 → 바로 3단계
+  if (!frozen && !playing()) {
+    const d = await ctAdvance(500);
+    if (!alive()) return;
+    if (d !== null && d <= 0) frozen = true;
+  }
+  if (frozen) {
+    diag(`[mic] 컨텍스트 시간 정지(running, ct 증가 0): 바로 새 컨텍스트로, ${micDesc()}`, 'warn');
+    await contextStage(`${why}, ct 정지`, alive);
+    return;
+  }
   // 1단계
   diag(`[mic] 프레임 없음(${why}): 컨텍스트 재개·캡처 그래프 재구성, ${micDesc()}`, 'warn');
   await wakeContext(600);
@@ -1663,11 +1840,16 @@ async function runMicFix(why) {
   if (!alive()) return;
   setTrackEnabled(true);
   captureCmd('start');
-  if (await waitPcm(t2, MIC_WATCH_MS, alive)) diag('[mic] 프레임 복구됨(트랙 재획득)');
-  else if (alive()) {
-    diag(`[mic] 복구 실패: 프레임이 여전히 없음, ${micDesc()}`, 'warn');
-    toast('마이크 입력이 들어오지 않아요. 끝내기를 누르고 앱을 다시 열어 주세요.', 6000);
+  if (await waitPcm(t2, MIC_WATCH_MS, alive)) { diag('[mic] 프레임 복구됨(트랙 재획득)'); return; }
+  if (!alive()) return;
+  // 3단계: 새 트랙에도 워클릿 process()가 안 돈다(레벨 보고·빈 입력조차 없음) = 컨텍스트 렌더링 정지
+  if (st.lastLevelAt < t2) {
+    diag(`[mic] 새 트랙에도 레벨 보고 없음: 컨텍스트를 새로 만듦, ${micDesc()}`, 'warn');
+    await contextStage(`${why}, 새 트랙 뒤 레벨 없음`, alive);
+    return;
   }
+  diag(`[mic] 복구 실패: 프레임이 여전히 없음(레벨 보고는 있음), ${micDesc()}`, 'warn');
+  toast('마이크 입력이 들어오지 않아요. 끝내기를 누르고 앱을 다시 열어 주세요.', 6000);
 }
 
 // 대화 중 무프레임 감시(1초마다). 화면이 숨겨진 동안은 iOS가 캡처를 멈추므로 보지 않는다.
@@ -1686,16 +1868,26 @@ function startDiag() {
   stopDiag();
   st.diagSq = 0;
   st.diagN = 0;
+  st.diagCtx = null;
   st.diagTimer = setInterval(() => {
     const t = micTrack();
+    // ctx.currentTime의 2초간 증가분: running인데 +0.000이면 렌더링이 멈춘 컨텍스트
+    const ctx = st.ctx;
+    const dCt = ctx && ctx === st.diagCtx ? ctx.currentTime - st.diagCt : null;
+    st.diagCtx = ctx;
+    st.diagCt = ctx ? ctx.currentTime : 0;
     const db = st.diagN ? hvDbfs(Math.sqrt(st.diagSq / st.diagN)).toFixed(1) : '-';
     st.diagSq = 0;
     st.diagN = 0;
     const since = st.lastPcmAt ? `${Math.round(performance.now() - st.lastPcmAt)}ms` : '-';
-    diag(`[mic] ${db} dBFS ctx ${st.ctx ? st.ctx.state : '-'} `
+    diag(`[mic] ${db} dBFS ctx ${st.ctx ? st.ctx.state : '-'} ct=${dCt === null ? '-' : '+' + dCt.toFixed(3)} `
       + (t ? `track ${t.readyState} muted=${t.muted} enabled=${t.enabled}` : 'track -')
       + ` pcm ${since} 전 빈입력 ${st.emptyN} 송신 ${micSending() ? 'Y' : 'N'} 재생 ${st.sources.size} ka ${st.keepAlive ? 'on' : 'off'}`
       + ` mute=${st.micMuted}`);
+    if (dCt !== null && dCt <= 0 && ctx.state === 'running' && st.conv && !st.micMuted && !st.micFix && !st.convStarting
+      && !document.hidden && !playing() && !st.ctxPending && st.convRebuilds < CTX_REBUILD_MAX) {
+      fixMic('진단: ct 정지 2초', true);
+    }
   }, 2000);
 }
 
@@ -1747,6 +1939,7 @@ async function onPressStart(e) {
   e.preventDefault();
   if (!st.ptt) {
     // 핸즈프리: 대화 전 탭은 시작. 대화 중엔 생각·말하는 중일 때만 끼어들기(끝내기는 종료 버튼)
+    if (st.conv && st.ctxPending && !st.micFix && !st.micMuted) { runPendingRebuild(); return; }
     if (st.conv) {
       const s = displayState();
       if (s === 'speaking' || isBusy(s) || playing()) interrupt();
@@ -1979,12 +2172,29 @@ async function recoverAll(why) {
   if (!st.conv) {
     if (st.ctx && st.ctx.state !== 'running') st.ctx.resume().catch(() => {});
     if (st.convPaused && !st.ptt) toast('대화가 멈췄어요. 가운데 구체를 탭하면 다시 시작해요.', 5000);
+    await checkCtxStall(why);
     return;
   }
   await recoverContext();
   await recoverMic();
+  if (await checkCtxStall(why) && st.conv && !playing() && !st.micMuted) fixMic(`복귀 ${why}: ct 정지`, true);
   if (!st.wsOpen) reconnectNow(`복귀 ${why}(복구 뒤)`);
   render();
+}
+
+// 복귀 점검: running인데 currentTime이 300 ms 동안 안 늘면 렌더링이 멈춘 컨텍스트로 표시한다
+// (다음 대화 시작 때 startConversation이 제스처 안에서 새로 만든다).
+async function checkCtxStall(why) {
+  const ctx = st.ctx;
+  if (!ctx || ctx.state !== 'running' || document.hidden) return false;
+  const a = ctx.currentTime;
+  await new Promise((r) => setTimeout(r, 300));
+  if (st.ctx !== ctx || ctx.state !== 'running' || document.hidden) return false;
+  const d = ctx.currentTime - a;
+  if (d > 0) return false;
+  st.ctxStalled = true;
+  diag(`[audio] 복귀 점검(${why}): ctx running인데 currentTime 정지(300ms 증가 ${d.toFixed(3)}) → 다음 대화 시작 때 새 컨텍스트`, 'warn');
+  return true;
 }
 
 document.addEventListener('visibilitychange', () => {
@@ -2071,4 +2281,21 @@ restoreChat();
 diagStore();
 render();
 connect();
+// 디버그 훅(콘솔·CDP 점검용): window.hv.recreateContext()는 3단계와 같은 경로로 컨텍스트를 새로 만든다
+window.hv = {
+  st,
+  async recreateContext(why = '디버그') {
+    const ctx = swapContext(why);
+    try { await withTimeout(ctx.resume(), 1500); } catch { /* */ }
+    let micErr = null;
+    try { await ensureMic(); } catch (e) { micErr = `${e && e.name} ${e && e.message}`; }
+    if (st.conv && st.capture) captureCmd('start');
+    return {
+      state: ctx.state, same: st.ctx === ctx, out: !!st.outBus && st.outBus.context === ctx && !!st.earBus && st.earBus.context === ctx,
+      keepAlive: st.keepAlive ? st.keepAlive.context === ctx : null, capture: st.capture ? st.capture.context === ctx : null,
+      worklet: !!ctx._hvWorklet, micErr,
+    };
+  },
+  ctAdvance,
+};
 if (location.hash === '#settings') { renderInfo(); el.menu.hidden = false; } // 시안·점검용
