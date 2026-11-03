@@ -147,7 +147,8 @@ def _numbers(t: str) -> str:
 
     def hm(m: re.Match) -> str:
         h, mi = int(m.group(1)), int(m.group(2))
-        return f"{h}시" if mi == 0 else f"{h}시 {mi}분"
+        hh = f"{native(h)} 시" if 1 <= h <= 24 else f"{h}시"
+        return hh if mi == 0 else f"{hh} {mi}분"
     t = re.sub(r"(?<![\d:])([01]?\d|2[0-3]):([0-5]\d)(?![\d:])", hm, t)
     t = re.sub(r"(?<=\d)\s*:\s*(?=\d)", " 대 ", t)                                   # 16:9
 
@@ -169,7 +170,60 @@ def _numbers(t: str) -> str:
     t = re.sub(r"\s?(?:°\s?[CcＣ]|℃)" + _NA, "도", t).replace("°", "도")
     units = "|".join(sorted(UNITS, key=len, reverse=True))
     t = re.sub(r"(?<=\d)\s?(%s)(?![A-Za-z])" % units, lambda m: UNITS[m.group(1)], t)
-    return t
+    return _native_counters(t)
+
+
+# ---------- 고유어 수사(네 번, 한 개, 열 시) ----------
+_NATIVE_ONES = ["", "한", "두", "세", "네", "다섯", "여섯", "일곱", "여덟", "아홉"]
+_NATIVE_TENS = ["", "열", "스물", "서른", "마흔", "쉰", "예순", "일흔", "여든", "아흔"]
+
+
+def native(n: int) -> str:
+    """1~99를 단위 앞 고유어 관형형으로(4 -> 네, 20 -> 스무, 21 -> 스물한)."""
+    if n == 20:
+        return "스무"
+    return _NATIVE_TENS[n // 10] + _NATIVE_ONES[n % 10]
+
+
+# 긴 것부터(번째·시간이 번·시보다 먼저). 쪽(페이지)은 한자어라 제외.
+_COUNTERS = ["번째", "켤레", "송이", "그루", "가지", "군데", "사람", "자루", "포기", "조각", "시간", "마리",
+             "번", "개", "명", "살", "시", "잔", "장", "권", "대", "병", "벌", "채", "척", "통", "곳",
+             "달", "판", "끼", "알", "줄"]
+# 단위 뒤에 오면 한자어(번호·장절·월·국가 등)로 보고 그대로 둔다
+_NO_AFTER = {
+    "번": r"\s?(?:버스|출구|도로|게이트|번지|번호|홀|라인|트랙|타자|플랫폼|문제|문항|항목|선택지|보기|후보|길)|[:.)]",
+    "개": r"월|국|년",
+    "장": r"\s?\d+\s?절",
+    "대": r"\s?(?:사건|선거|대통령)|\s?\d",
+    "달": r"러",
+    "병": r"원|동|실",
+    "판": r"\s?\d+\s?쇄",
+}
+# "N시"는 이 말이 뒤따를 때만 시각으로 본다(보수적)
+_TIME_AFTER = re.compile(r"(?:에|까지|부터|쯤|경|께|\s?반|\s?정각|분|\s|[.,!?…]|$)")
+_COUNTER_RE = re.compile(r"(?<![\dA-Za-z.#])(\d{1,2})(\s?)(%s)" % "|".join(_COUNTERS))
+
+
+def _native_counters(t: str) -> str:
+    """숫자 + 고유어 단위(번·개·명·살·시·시간…)를 고유어 수사로. 1~99만, 예외는 그대로."""
+    def rep(m: re.Match) -> str:
+        num, unit = m.group(1), m.group(3)
+        n = int(num)
+        before, after = t[:m.start()], t[m.end():]
+        if num.startswith("0") or not 1 <= n <= 99:
+            return m.group(0)
+        if re.search(r"(?:제|No\.\s?|#\s?|점 )$", before):   # 제4번, No. 3, #2, 소수(3점 5개)
+            return m.group(0)
+        if unit in _NO_AFTER and re.match(_NO_AFTER[unit], after):
+            return m.group(0)
+        if unit == "대" and n % 10 == 0:                     # 20대(연령대)
+            return m.group(0)
+        if unit == "시" and (n > 24 or not _TIME_AFTER.match(after)):
+            return m.group(0)
+        if unit == "번째" and n == 1:
+            return "첫 번째"
+        return f"{native(n)} {unit}"
+    return _COUNTER_RE.sub(rep, t)
 
 
 def _symbols(t: str) -> str:
