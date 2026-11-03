@@ -288,15 +288,31 @@ class VoiceSession:
             await self._hold()
             await self.set_state("listening")
 
-    def _mic_db_between(self, t0: float, t1: float) -> Optional[float]:
-        xs = [p for t, p in self._mic_hist if t0 <= t <= t1]
-        if not xs:
+    def _mic_db_between(self, t0: float, t1: float, min_windows: int = 1) -> Optional[float]:
+        """t0~t1 마이크 창 평균(dB). 디지털 무음 창(≤ MIC_SILENCE_DB)은 빼고, 유효 창이 min_windows보다 적으면 None."""
+        xs = [p for t, p in self._mic_hist
+              if t0 <= t <= t1 and 10 * np.log10(max(p, 1e-18)) > config.MIC_SILENCE_DB]
+        if len(xs) < max(1, min_windows):
             return None
         return float(10 * np.log10(max(sum(xs) / len(xs), 1e-18)))
 
+    def _duck_user_ok(self, d: dict, db: float) -> bool:
+        """사용자 말 추가 조건: 레벨이 hold 때 에코 예상 레벨 + DUCK_USER_MARGIN_DB 초과(expected NaN이면 통과)."""
+        exp = d.get("exp_db", float("nan"))
+        return exp != exp or db > exp + config.DUCK_USER_MARGIN_DB
+
+    async def _duck_resume_unsure(self, why: str) -> None:
+        """덕킹 검사로 판정할 수 없음: 끼어들기 확정 없이 재생 복귀, 말 끝에서 STT 에코 필터로 판정."""
+        self._duck = None
+        log.info("덕킹 검사: %s -> 재생 복귀(말 끝에 판정)", why)
+        await self._resume()
+        self._echo_check = True
+
     async def _check_duck(self) -> None:
         """hold(duck) 뒤 DUCK_TEST_DELAY_MS부터 DUCK_TEST_MS 동안의 마이크 평균이 hold 직전 320 ms보다
-        DUCK_DROP_DB 넘게 내려가면 에코(내 소리를 줄이자 따라 내려감) -> resume, 아니면 사용자 말 -> interrupt."""
+        DUCK_DROP_DB 넘게 내려가면 에코(내 소리를 줄이자 따라 내려감) -> resume, 아니면 사용자 말 -> interrupt.
+        디지털 무음 창(≤ MIC_SILENCE_DB)은 pre/post 모두에서 뺀다. pre가 무음뿐이면 판정 없이 재생 복귀.
+        사용자 말은 post가 에코 예상 레벨(expected_db) + DUCK_USER_MARGIN_DB를 넘어야 확정한다."""
         d = self._duck
         if d is None or not self.holding:
             self._duck = None
@@ -304,40 +320,65 @@ class VoiceSession:
         if self._hold_task is not None:  # 검사 전에 말이 끝나 STT 판정으로 넘어감
             self._duck = None
             return
-        t0 = d["at"] + config.DUCK_TEST_DELAY_MS / 1000
-        t1 = t0 + config.DUCK_TEST_MS / 1000
         pre = d["pre_db"]
-        # 조기 판정: 검사 구간 창을 차례로 보며 연속 DUCK_EARLY_WINDOWS창이 pre - DUCK_DROP_DB 이하면 에코,
-        # pre - DUCK_KEEP_DB 초과면 사용자 말
+        if pre is None:
+            await self._duck_resume_unsure("기준 구간이 무음")
+            return
+        t0 = d["at"] + config.DUCK_TEST_DELAY_MS / 1000
+        t1 = t0 + config.DUCK_TEST_MS / 1000 * (2 if d.get("ext") else 1)
+        # 조기 판정: 검사 구간 창(무음 창 제외)을 차례로 보며 연속 DUCK_EARLY_WINDOWS창이 pre - DUCK_DROP_DB 이하면
+        # 에코, pre - DUCK_KEEP_DB 초과이고 에코 예상 레벨 + 여유도 넘으면 사용자 말
         low = high = 0
         verdict = None
         for t, pw in self._mic_hist:
             if t < t0 or t > t1:
                 continue
             db = 10 * np.log10(max(pw, 1e-18))
+            if db <= config.MIC_SILENCE_DB:
+                continue
             low = low + 1 if db <= pre - config.DUCK_DROP_DB else 0
-            high = high + 1 if db > pre - DUCK_KEEP_DB else 0
+            high = high + 1 if db > pre - DUCK_KEEP_DB and self._duck_user_ok(d, db) else 0
             if low >= DUCK_EARLY_WINDOWS:
                 verdict, at = "echo", t
                 break
             if high >= DUCK_EARLY_WINDOWS:
                 verdict, at = "user", t
                 break
+        level_echo = False
         if verdict is None:
             if not self._mic_hist or self._mic_hist[-1][0] < t1:
                 return
-            post = self._mic_db_between(t0, t1)
-            if post is None:
+            if not any(t0 <= t <= t1 for t, _ in self._mic_hist):
                 self._duck = None
                 log.info("덕킹 검사: 검사 구간 입력 없음 -> 기존 판정으로")
                 return
-            verdict = "echo" if pre - post >= config.DUCK_DROP_DB else "user"
+            post = self._mic_db_between(t0, t1, config.DUCK_PRE_MIN_WINDOWS)
+            if post is None:
+                if not d.get("ext"):
+                    d["ext"] = True
+                    log.info("덕킹 검사: 검사 구간 유효 창 부족(무음) -> %d ms 연장", config.DUCK_TEST_MS)
+                    return
+                await self._duck_resume_unsure("검사 구간이 무음")
+                return
+            if pre - post >= config.DUCK_DROP_DB:
+                verdict = "echo"
+            elif self._duck_user_ok(d, post):
+                verdict = "user"
+            else:
+                verdict, level_echo = "echo", True
             how, at, val = "평균", t1, post
         else:
             how, val = f"연속 {DUCK_EARLY_WINDOWS}창", db
         self._duck = None
         took = (at - d["at"]) * 1000
-        if verdict == "echo":
+        if level_echo:
+            # 하강은 없지만 에코 예상 레벨 수준: 확정하지 않고 재생 복귀, 말 끝 STT 에코 필터로
+            log.info("덕킹 검사(%s): pre %.1f dB -> %.1f dB (%.1f dB 하강, hold 뒤 %.0f ms), expected %.1f dB + %.0f 이하 "
+                     "-> 에코 쪽, 재생 복귀(말 끝에 판정)", how, pre, val, pre - val, took, d["exp_db"],
+                     config.DUCK_USER_MARGIN_DB)
+            await self._resume()
+            self._echo_check = True
+        elif verdict == "echo":
             log.info("덕킹 검사(%s): pre %.1f dB -> %.1f dB (%.1f dB 하강, hold 뒤 %.0f ms) -> 에코, 재생 복귀",
                      how, pre, val, pre - val, took)
             prev = self._duck_echo
@@ -674,9 +715,12 @@ class VoiceSession:
         self._duck = None
         if self._hold_mode == "duck":
             # 재생은 계속(소리만 낮춤): 서버도 오디오를 계속 보내고 시간축도 이어 간다
-            pre = self._mic_db_between(self._hold_at - 0.32, self._hold_at)
-            if pre is not None:
-                self._duck = {"at": self._hold_at, "pre_db": pre}
+            # 기준(pre): 디지털 무음 창을 뺀 직전 320 ms 평균. 입력은 있는데 유효 창이 부족하면 pre None
+            # -> _check_duck이 판정 없이 재생 복귀(말 끝 STT 필터). 입력 자체가 없으면 기존 판정(확정 시간/STT).
+            t0 = self._hold_at - 0.32
+            if any(t0 <= t <= self._hold_at for t, _ in self._mic_hist):
+                pre = self._mic_db_between(t0, self._hold_at, config.DUCK_PRE_MIN_WINDOWS)
+                self._duck = {"at": self._hold_at, "pre_db": pre, "exp_db": self.gate.last.expected_db}
             await self.send_json({"type": "hold", "generation": self.generation, "mode": "duck",
                                   "gain": config.DUCK_GAIN})
         else:
@@ -685,7 +729,8 @@ class VoiceSession:
             await self.send_json({"type": "hold", "generation": self.generation})
         log.info("잠정 끼어들기 -> hold(%s) gen %d (%s%s%s)", self._hold_mode, self.generation, self._gate_desc(),
                  "" if self._aec_on else ", 대조 꺼짐: pos_ms 없음",
-                 f", pre {self._duck['pre_db']:.1f} dB" if self._duck else "")
+                 f", pre {self._duck['pre_db']:.1f} dB" if self._duck and self._duck["pre_db"] is not None
+                 else (", pre 무음" if self._duck else ""))
 
     def _clear_hold(self) -> None:
         if not self.holding and self._hold_task is None:

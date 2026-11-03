@@ -559,3 +559,102 @@ def test_speech_resumes_while_echo_judging_carries():
         assert s._echo_task is None and len(s._carry) == 16000 and s._echo_check
         s.speaker_task.cancel()
     asyncio.run(go())
+
+
+# ---------- 덕킹 검사: 디지털 무음 창 제외와 에코 예상 레벨 조건(2026-11-03 실기 18:21) ----------
+
+async def hold_with(s, pre_dbs, expected_db=float("nan")):
+    """hold 직전 창 레벨(조각당 3창)을 넣고 게이트 expected_db를 정한 뒤 hold."""
+    for i in range(5):
+        s.clock.t += 0.096
+        await s._on_audio(chunk_levels(pre_dbs, seed=200 + i))
+    s.gate.last = GateResult(expected_db=expected_db)
+    s.endpointer.in_speech, s.endpointer.speech_ms = True, 416
+    await s._on_vad(VADEvent("start", barge=True))
+
+
+def test_duck_silent_pre_resumes_with_echo_check():
+    """pre 구간이 전부 디지털 무음(-180 dBFS)이면 끼어들기 확정 없이 재생 복귀하고 말 끝 STT 필터로."""
+    async def go():
+        s, ws, stt, hermes, gen = await setup_duck()
+        await hold_with(s, [-180, -180, -180], expected_db=-33.1)
+        assert s.holding and s._duck is not None and s._duck["pre_db"] is None
+        await feed_until(s, ws, [-38, -38, -38], "resume")
+        assert ws.of("resume") == [{"type": "resume", "generation": gen}]
+        assert not ws.of("interrupt") and not s.holding and s._echo_check
+        await feed(s, -38, 576, seed=300)          # 이어지는 에코가 끼어들기로 바뀌지 않음
+        assert not ws.of("interrupt")
+        s.speaker_task.cancel()
+    asyncio.run(go())
+
+
+def test_duck_no_drop_below_expected_is_echo():
+    """pre 유효, 하강은 없지만 post가 expected + DUCK_USER_MARGIN_DB 이하면 사용자 말로 확정하지 않는다."""
+    async def go():
+        s, ws, stt, hermes, gen = await setup_duck()
+        await hold_with(s, [-38, -38, -38], expected_db=-33.1)
+        await feed(s, -38, 576, seed=310)
+        assert ws.of("resume") == [{"type": "resume", "generation": gen}]
+        assert not ws.of("interrupt") and s._echo_check
+        s.speaker_task.cancel()
+    asyncio.run(go())
+
+
+def test_duck_loud_user_over_expected_interrupts():
+    """진짜 사용자 말(pre -16 -> post -9, expected -37)은 그대로 끼어들기 확정."""
+    async def go():
+        s, ws, stt, hermes, gen = await setup_duck()
+        await hold_with(s, [-16, -16, -16], expected_db=-37.0)
+        await feed(s, -9, 576, seed=320)
+        assert ws.of("interrupt") == [{"type": "interrupt", "generation": gen + 1}]
+        assert not ws.of("resume")
+        s.speaker_task.cancel()
+    asyncio.run(go())
+
+
+def test_duck_post_silent_windows_excluded():
+    """post에 무음 창이 섞여도 유효 창 평균/연속으로 판정: 무음 빼면 하강 없음 -> 사용자 말."""
+    async def go():
+        s, ws, stt, hermes, gen = await setup_duck()
+        await hold_with(s, [-44, -44, -44])
+        took = await feed_until(s, ws, [-43, -180, -43], "interrupt")
+        assert took is not None and not ws.of("resume")
+        s.speaker_task.cancel()
+    asyncio.run(go())
+
+
+def test_mic_db_between_skips_silence():
+    async def go():
+        s, ws, stt, hermes, gen = await setup_duck()
+        t0 = s.clock.t
+        for i in range(4):
+            s.clock.t += 0.096
+            await s._on_audio(chunk_levels([-30, -180, -30], seed=330 + i))
+        v = s._mic_db_between(t0, s.clock.t)
+        assert v is not None and abs(v + 30) < 1.0
+        assert s._mic_db_between(t0, s.clock.t, min_windows=9) is None   # 유효 8창
+        s.speaker_task.cancel()
+    asyncio.run(go())
+
+
+def test_duck_post_silent_extends_once_then_judges():
+    """post가 무음뿐이면 DUCK_TEST_MS만큼 한 번 연장, 그 사이 유효 입력이 오면 그걸로 판정."""
+    async def go():
+        s, ws, stt, hermes, gen = await setup_duck()
+        await hold_with(s, [-44, -44, -44])
+        await feed(s, -180, 480, seed=340)         # 원래 검사 구간(180~480 ms)은 무음
+        assert s.holding and s._duck is not None and s._duck.get("ext")
+        await feed(s, -53, 384, seed=350)          # 연장 구간에 에코 하강
+        assert ws.of("resume") and not ws.of("interrupt")
+        s.speaker_task.cancel()
+    asyncio.run(go())
+
+
+def test_duck_post_silent_after_extension_resumes():
+    async def go():
+        s, ws, stt, hermes, gen = await setup_duck()
+        await hold_with(s, [-44, -44, -44])
+        await feed(s, -180, 960, seed=360)
+        assert ws.of("resume") and not ws.of("interrupt") and s._echo_check and not s.holding
+        s.speaker_task.cancel()
+    asyncio.run(go())

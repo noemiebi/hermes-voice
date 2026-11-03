@@ -94,6 +94,12 @@ DUCK_GAIN = float(os.environ.get("DUCK_GAIN", "0.2"))  # 실기: 0.3에서 에�
 DUCK_TEST_DELAY_MS = int(os.environ.get("DUCK_TEST_DELAY_MS", "180"))  # hold 뒤 이만큼 지나서부터
 DUCK_TEST_MS = int(os.environ.get("DUCK_TEST_MS", "300"))              # 이 시간 동안 마이크 평균을 잰다
 DUCK_DROP_DB = float(os.environ.get("DUCK_DROP_DB", "6"))              # hold 전보다 이만큼 내려가면 에코
+# 덕킹 검사에서 이 레벨(dBFS) 이하 창은 디지털 무음(iOS가 재생 시작 직후 마이크를 0으로 보냄)으로 보고 pre/post 평균에서 뺀다
+MIC_SILENCE_DB = float(os.environ.get("MIC_SILENCE_DB", "-65"))
+# pre(또는 연장 뒤 post) 유효 창이 이보다 적으면 판정하지 않고 재생 복귀(말 끝 STT 에코 필터로)
+DUCK_PRE_MIN_WINDOWS = int(os.environ.get("DUCK_PRE_MIN_WINDOWS", "4"))
+# "사용자 말" 판정은 post가 hold 때 게이트 expected_db(에코 예상 레벨) + 이 값보다 커야 함(expected가 NaN이면 생략)
+DUCK_USER_MARGIN_DB = float(os.environ.get("DUCK_USER_MARGIN_DB", "6"))
 # 확실한 에코면 덕킹 검사 생략: 최근 DUCK_SKIP_WINDOWS창(판정된 것) corr 중앙값 ≥ DUCK_SKIP_CORR이고
 # mic_db 중앙값 ≤ expected_db 중앙값 + DUCK_SKIP_LEVEL_DB면 hold 없이 재생 유지, 말 끝에서 대조로 판정. 0이면 끔
 DUCK_SKIP_CORR = float(os.environ.get("DUCK_SKIP_CORR", "0.7"))
