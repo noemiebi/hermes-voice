@@ -4,7 +4,7 @@
 //   끄려면 Safari 콘솔(또는 웹 검사기)에서 localStorage.setItem('hv.keepalive', '0') 후 새로 고침. 다시 켜려면 removeItem.
 'use strict';
 
-const APP_VERSION = '0.6.4';
+const APP_VERSION = '0.6.5';
 const AGENT_NAME_DEFAULT = 'Herbot'; // 서버 ready의 agent_name이 오면 그걸 쓴다
 const KEEPALIVE_LEVEL = 1e-5; // 약 -100 dBFS
 const DIAG_BUF_MAX = 20; // WS가 닫힌 동안 모아 둘 진단 줄 수
@@ -862,6 +862,12 @@ function reconnectNow(why = '') {
 function onEvent(m) {
   switch (m.type) {
     case 'ready':
+      // 새 서버 세션은 generation을 0부터 다시 센다. 이전 연결에서 죽인 번호 목록을 들고 있으면
+      // 새 답의 오디오를 버려 소리가 안 나므로(2026-11-03 20:33 실기) 여기서 비운다.
+      stopPlayback();
+      st.deadGens = new Set();
+      st.gen = -1;
+      st.pbBaseMs = 0;
       if (m.session_id) {
         st.sessionId = m.session_id;
         noteSession(m.session_id);
