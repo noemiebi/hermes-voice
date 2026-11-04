@@ -218,6 +218,47 @@ def fuzzy_ratio(text: str, recent: Iterable[str], last_n: int = 2, slack: int = 
     return best
 
 
+# 사용자 질문·요청 어미: 받아쓴 말이 이걸로 끝나는데 최근 답 문장에 그 낱말이 없으면 답을 따라 말한 '질문'이다
+ASK_ENDS = ("뭐야", "뭔데", "냐고", "냐", "니", "나요", "까", "까요", "줘", "줘요", "해줘", "알려줘",
+            "어때", "어때요", "뭐예요", "뭐에요", "는데요", "래요")
+EXTRA_TOKENS = 2       # 최근 답 문장에 없는 낱말이 이만큼 이상이면 사용자 말
+
+
+def _covered(tok: str, joined: str, have: set[str]) -> bool:
+    """낱말이 최근 문장에 있는지(조사 하나 차이·받아쓰기 오류는 bigram 절반 이상이면 있는 것으로)."""
+    if tok in joined or (len(tok) >= 3 and tok[:-1] in joined):
+        return True
+    bg = _bigrams(tok)
+    return bool(bg) and sum(b in have for b in bg) / len(bg) >= 0.5
+
+
+def user_content_reason(text: str, recent: Iterable[str], extra_min: Optional[int] = EXTRA_TOKENS) -> Optional[str]:
+    """받아쓴 말에 최근 답 문장에 없는 내용이 있으면 그 근거(= 에코가 아니라 사용자 말), 없으면 None.
+    ① 마지막 낱말이 질문·요청 어미(ASK_ENDS)로 끝나는데 그 낱말이 최근 문장에 없음
+    ② 최근 문장에 없는 낱말(2자 이상)이 extra_min개 이상.
+    실기: '내일 아침 9시에 개표 결과가 나오냐고'(전역 bigram 0.87), '선호 순위 투표가 뭐야'(퍼지 0.75)가 에코로 버려짐."""
+    sents = [s for s in (normalize(x) for x in recent) if s]
+    if not sents:
+        return None
+    joined = "".join(sents)
+    have = set(_bigrams(joined))
+    for s in sents:
+        have.update(_bigrams(s))
+    words = [w for w in (normalize(x) for x in (text or "").split()) if w]
+    if not words:
+        return None
+    last = words[-1]
+    end = next((e for e in ASK_ENDS if last.endswith(e)), None)
+    if end and last not in joined:
+        return f"질문·요청 어미 '{last}'"
+    if extra_min is None:  # 낱말 규칙 끔(재생 중 에코 검사 대상)
+        return None
+    extra = [w for w in words if len(w) >= 2 and not _covered(w, joined, have)]
+    if len(extra) >= extra_min:
+        return f"답에 없는 낱말 {len(extra)}개({' '.join(extra[:3])})"
+    return None
+
+
 def is_echo(text: str, recent: Iterable[str]) -> bool:
     return echo_reason(text, recent) is not None
 
@@ -290,6 +331,18 @@ class EchoMemory:
         thr = ECHO_FUZZY_RATIO if ratio is None else ratio
         r = self.fuzzy(text, last_n=last_n)
         return r if r >= thr else None
+
+    def user_content_reason(self, text: str, extra_words: bool = True) -> Optional[str]:
+        """받아쓴 말이 최근 문장(원문·독음)으로 설명되지 않는 사용자 내용을 담았으면 근거, 아니면 None.
+        받아쓴 말 원형·독음형 x 원문·독음 목록 중 하나라도 설명되면(근거 없음) None."""
+        first = None
+        for v in _variants(text):
+            for lst in self._lists():
+                r = user_content_reason(v, lst, EXTRA_TOKENS if extra_words else None)
+                if r is None:
+                    return None
+                first = first or r
+        return first
 
     def is_echo(self, text: str) -> bool:
         return self.reason(text) is not None

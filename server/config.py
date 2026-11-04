@@ -198,3 +198,13 @@ PITCH_SAVE_INTERVAL_S = float(os.environ.get("PITCH_SAVE_INTERVAL_S", "60"))  # 
 
 # 대화 중 Tailscale 직접 경로 유지: 이 간격(초)마다 `tailscale ping`으로 경로 탐색을 재촉(0이면 끔). 릴레이 전환 뒤 다운링크 저하 완화(2026-11-04)
 NET_NUDGE_S = float(os.environ.get("NET_NUDGE_S", "20"))
+
+# ---------- 말 이어짐·턴 마감(2026-11-04) ----------
+# 앞 발화가 끝난 뒤 이 시간(초) 안에 말이 다시 시작됐고 앞 턴이 아직 첫 토큰·오디오 전이면 끼어들기 대신 앞 발화와 합쳐 다시 받아씀
+TURN_MERGE_WINDOW_S = float(os.environ.get("TURN_MERGE_WINDOW_S", "2.0"))
+# 받아쓴 문장이 연결 어미(…고, …는데, …면 등)나 아주 짧은 말로 끝나면 이만큼(ms) 더 기다려 이어지는 말과 합침(0이면 끔)
+TURN_CONTINUE_WAIT_MS = int(os.environ.get("TURN_CONTINUE_WAIT_MS", "700"))
+# 헤르메스 한 턴 응답 전체 상한(초). 넘으면 오류로 턴을 끝냄
+HERMES_TURN_MAX_S = float(os.environ.get("HERMES_TURN_MAX_S", "180"))
+# 재생이 아닐 때의 전역 에코 규칙은 재생이 끝난 뒤 이 시간(초) 안에 시작된 발화에만 씀
+ECHO_GLOBAL_WINDOW_S = float(os.environ.get("ECHO_GLOBAL_WINDOW_S", "1.5"))

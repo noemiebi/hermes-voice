@@ -139,17 +139,24 @@ def _numbers(t: str) -> str:
             return f"{y}년 {mo}월 {d}일"
         return m.group(0)
     t = re.sub(r"(?<![\d.])((?:19|20)\d{2})[-./](\d{1,2})[-./](\d{1,2})(?![\d])", ymd, t)
+    # 띄어 쓴 날짜(2026. 11. 4.): 뒤에 말이 이어지면 끝 마침표도 먹는다
+    t = re.sub(r"(?<![\d.])((?:19|20)\d{2})\.\s(\d{1,2})\.\s(\d{1,2})(?:\.(?=\s+\S))?(?![\d])", ymd, t)
 
     def ym(m: re.Match) -> str:
         mo = int(m.group(2))
         return f"{m.group(1)}년 {mo}월" if 1 <= mo <= 12 else m.group(0)
     t = re.sub(r"(?<![\d.])((?:19|20)\d{2})[-.](\d{1,2})(?![\d.-])", ym, t)
 
+    # 범위(3~5, 10-20, 10:00~12:00, 3시~5시)는 시각(hm)보다 먼저 "에서"로 바꾼다(시각을 바꾼 뒤엔 숫자가 아니라 못 잡음)
+    t = re.sub(r"(?<=\d)\s*[~～∼–—-]\s*(?=\d)", "에서 ", t)
+    t = re.sub(r"(?<=\S)\s*[~～∼]\s*(?=\d)", "에서 ", t)
+
     def hm(m: re.Match) -> str:
         h, mi = int(m.group(1)), int(m.group(2))
-        hh = f"{native(h)} 시" if 1 <= h <= 24 else f"{h}시"
+        # 1~12시만 고유어(열 시). 13~24시는 숫자 그대로 두어 한자어로(십삼 시) 읽게 한다
+        hh = f"{native(h)} 시" if 1 <= h <= 12 else f"{h}시"
         return hh if mi == 0 else f"{hh} {mi}분"
-    t = re.sub(r"(?<![\d:])([01]?\d|2[0-3]):([0-5]\d)(?![\d:])", hm, t)
+    t = re.sub(r"(?<![\d:])([01]?\d|2[0-4]):([0-5]\d)(?![\d:])", hm, t)
     t = re.sub(r"(?<=\d)\s*:\s*(?=\d)", " 대 ", t)                                   # 16:9
 
     def slash(m: re.Match) -> str:
@@ -162,8 +169,6 @@ def _numbers(t: str) -> str:
     t = re.sub(r"(?<![\d/.])(\d{1,3})\s*/\s*(\d{1,3})(?![\d/])", slash, t)
 
     t = re.sub(r"(?<=\d)\.(?=\d)", "점 ", t)                                          # 3.5 -> 3점 5
-    t = re.sub(r"(?<=\d)\s*[~～∼–—-]\s*(?=\d)", "에서 ", t)                            # 3~5, 10-20
-    t = re.sub(r"(?<=\S)\s*[~～∼]\s*(?=\d)", "에서 ", t)                               # 3시~5시
     t = re.sub(r"(?:(?<=^)|(?<=[\s(]))[-−](?=\d)", "마이너스 ", t)                       # -5도
     t = re.sub(r"\$\s?(\d+(?:점 \d+)?)", r"\1달러", t)
     t = re.sub(r"[₩￦]\s?(\d+(?:점 \d+)?)", r"\1원", t)
@@ -191,38 +196,61 @@ _COUNTERS = ["번째", "켤레", "송이", "그루", "가지", "군데", "사람
              "달", "판", "끼", "알", "줄"]
 # 단위 뒤에 오면 한자어(번호·장절·월·국가 등)로 보고 그대로 둔다
 _NO_AFTER = {
-    "번": r"\s?(?:버스|출구|도로|게이트|번지|번호|홀|라인|트랙|타자|플랫폼|문제|문항|항목|선택지|보기|후보|길)|[:.)]",
+    "번": r"지|길|[:.)]"                                                    # 5번지, 12번길, 1번:
+          r"|\s?(?:버스|출구|도로|게이트|홀|라인|트랙|타자|플랫폼|문제|문항|항목|선택지|보기|후보|고객|손님|환자"
+          r"|방(?!문)|채널|정답|답(?![했해하])|줄|테이블|좌석|창구|승강장|타석)"   # 3번 방(3번 방문은 횟수)
+          r"|[이은가을는]\s(?:정답|맞|틀|답)",                                    # 2번이 정답, 3번은 틀렸어
     "개": r"월|국|년",
     "장": r"\s?\d+\s?절",
-    "대": r"\s?(?:사건|선거|대통령)|\s?\d",
+    "대": r"\s?(?:사건|선거|대통령|강국|보험|은행|도시|기업|주주|그룹|명절|원칙)|\s?\d",
     "달": r"러",
     "병": r"원|동|실",
     "판": r"\s?\d+\s?쇄",
 }
 # "N시"는 이 말이 뒤따를 때만 시각으로 본다(보수적)
-_TIME_AFTER = re.compile(r"(?:에|까지|부터|쯤|경|께|\s?반|\s?정각|분|\s|[.,!?…]|$)")
+_TIME_AFTER = re.compile(r"(?:에|까지|부터|쯤|경|께|\s?반|\s?정각|분|\d{1,2}\s?분|\s|[.,!?…]|$)")
 _COUNTER_RE = re.compile(r"(?<![\dA-Za-z.#])(\d{1,2})(\s?)(%s)" % "|".join(_COUNTERS))
+
+
+def _counter_word(num: str, unit: str, before: str, after: str) -> Optional[str]:
+    """숫자+단위 하나를 고유어로 읽은 말. 한자어로 둘 자리(번호·장절·연령대·13시 이후 등)면 None."""
+    n = int(num)
+    if num.startswith("0") or not 1 <= n <= 99:
+        return None
+    if re.search(r"(?:제|No\.\s?|#\s?|점 )$", before):   # 제4번, No. 3, #2, 소수(3점 5개)
+        return None
+    if unit in _NO_AFTER and re.match(_NO_AFTER[unit], after):
+        return None
+    if unit == "대" and n % 10 == 0:                     # 20대(연령대)
+        return None
+    if unit == "시" and (n > 12 or not _TIME_AFTER.match(after)):   # 13시 이후는 숫자 그대로(십삼 시)
+        return None
+    if unit == "번째" and n == 1:
+        return "첫 번째"
+    return f"{native(n)} {unit}"
+
+
+_COUNTER_RANGE_RE = re.compile(r"(?<![\dA-Za-z.#])(\d{1,2})에서 (\d{1,2})(\s?)(%s)" % "|".join(_COUNTERS))
 
 
 def _native_counters(t: str) -> str:
     """숫자 + 고유어 단위(번·개·명·살·시·시간…)를 고유어 수사로. 1~99만, 예외는 그대로."""
-    def rep(m: re.Match) -> str:
-        num, unit = m.group(1), m.group(3)
-        n = int(num)
+    def rng(m: re.Match) -> str:
+        # 3에서 5개 -> 세 개에서 다섯 개(앞 숫자에도 단위를 붙여 읽는다)
+        a, b, unit = m.group(1), m.group(2), m.group(4)
         before, after = t[:m.start()], t[m.end():]
-        if num.startswith("0") or not 1 <= n <= 99:
+        wb = _counter_word(b, unit, before + a + "에서 ", after)
+        if wb is None:
             return m.group(0)
-        if re.search(r"(?:제|No\.\s?|#\s?|점 )$", before):   # 제4번, No. 3, #2, 소수(3점 5개)
+        wa = _counter_word(a, unit, before, "에서")
+        return f"{wa if wa else a}에서 {wb}" + (" " if after[:1].isdigit() else "")
+    t = _COUNTER_RANGE_RE.sub(rng, t)
+
+    def rep(m: re.Match) -> str:
+        w = _counter_word(m.group(1), m.group(3), t[:m.start()], t[m.end():])
+        if w is None:
             return m.group(0)
-        if unit in _NO_AFTER and re.match(_NO_AFTER[unit], after):
-            return m.group(0)
-        if unit == "대" and n % 10 == 0:                     # 20대(연령대)
-            return m.group(0)
-        if unit == "시" and (n > 24 or not _TIME_AFTER.match(after)):
-            return m.group(0)
-        if unit == "번째" and n == 1:
-            return "첫 번째"
-        return f"{native(n)} {unit}"
+        return w + (" " if t[m.end():m.end() + 1].isdigit() else "")   # 7시30분 -> 일곱 시 30분
     return _COUNTER_RE.sub(rep, t)
 
 
@@ -283,5 +311,6 @@ def normalize_for_tts(text: str, *, lexicon: Optional[dict[str, str]] = None,
     t = _numbers(t)
     t = _english(t, lex, pat, english_mode)  # Wi-Fi 같은 붙임표 항목이 기호 처리 전에 잡히도록
     t = _symbols(t)
+    t = re.sub(r"[^\u0000-\uFFFF]", "", t)   # U+FFFF 초과(국기 태그·CJK 확장 B 등)는 Supertonic이 못 받는다
     t = _tidy(t)
     return t if re.search(r"\w", t) else ""

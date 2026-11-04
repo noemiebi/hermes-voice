@@ -69,7 +69,7 @@ async def ask(hermes, tts=None, wait=1.2):
     s.style_note = ""
     s.speaker_task = asyncio.create_task(s._speaker())
     await s._on_text(json.dumps({"type": "hello", "resume": None}))
-    await s._on_text(json.dumps({"type": "text", "text": "서울 날씨 어때?"}))
+    await s._on_text(json.dumps({"type": "text", "text": "서울 날씨 어때요?"}))
     await asyncio.sleep(wait)
     s.speaker_task.cancel()
     return s, ws, tts
@@ -131,7 +131,7 @@ def test_queued_filler_skipped_when_answer_arrives(fast, caplog):
         s.style_note = ""
         s.speaker_task = asyncio.create_task(s._speaker())
         await s._on_text(json.dumps({"type": "hello", "resume": None}))
-        await s._on_text(json.dumps({"type": "text", "text": "서울 날씨 어때?"}))
+        await s._on_text(json.dumps({"type": "text", "text": "서울 날씨 어때요?"}))
         await asyncio.sleep(0.25)            # 첫 채움 말이 합성 중
         from server.session import _Filler
         s.queue.put_nowait((s.generation, _Filler(FILLER_GENERIC[1])))  # 미재생 채움 말이 큐에 남은 상황
@@ -178,7 +178,7 @@ def test_interrupt_cancels_scheduler(fast):
         s.style_note = ""
         s.speaker_task = asyncio.create_task(s._speaker())
         await s._on_text(json.dumps({"type": "hello", "resume": None}))
-        await s._on_text(json.dumps({"type": "text", "text": "서울 날씨 어때?"}))
+        await s._on_text(json.dumps({"type": "text", "text": "서울 날씨 어때요?"}))
         await asyncio.sleep(0.3)
         await s.interrupt()
         n = len(ws.of("speak_start"))
@@ -276,7 +276,7 @@ def test_gap_aborts_on_interrupt(fast, monkeypatch):
         s.style_note = ""
         s.speaker_task = asyncio.create_task(s._speaker())
         await s._on_text(json.dumps({"type": "hello", "resume": None}))
-        await s._on_text(json.dumps({"type": "text", "text": "서울 날씨 어때?"}))
+        await s._on_text(json.dumps({"type": "text", "text": "서울 날씨 어때요?"}))
         await asyncio.sleep(0.6)             # 채움 말 재생 뒤 본문이 여유 대기 중
         assert ANSWER not in spoken(ws)
         await s.interrupt()
@@ -318,7 +318,7 @@ async def _ask_after(store, sid, hermes, wait=1.2):
     s.style_note = ""
     s.speaker_task = asyncio.create_task(s._speaker())
     await s._on_text(json.dumps({"type": "hello", "resume": sid}))
-    await s._on_text(json.dumps({"type": "text", "text": "서울 날씨 어때?"}))
+    await s._on_text(json.dumps({"type": "text", "text": "서울 날씨 어때요?"}))
     await asyncio.sleep(wait)
     s.speaker_task.cancel()
     return s, ws
@@ -363,7 +363,7 @@ def test_casual_previous_answer_in_session_memory(fast):
         await s._on_text(json.dumps({"type": "hello", "resume": None}))
         await s._on_text(json.dumps({"type": "text", "text": "찾아 줘"}))
         await asyncio.sleep(0.3)
-        await s._on_text(json.dumps({"type": "text", "text": "서울 날씨 어때?"}))
+        await s._on_text(json.dumps({"type": "text", "text": "서울 날씨 어때요?"}))
         await asyncio.sleep(1.2)
         s.speaker_task.cancel()
         return ws

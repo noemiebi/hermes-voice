@@ -145,7 +145,8 @@ class SilenceTrimmer:
 
 class TempoStretcher:
     """음높이를 유지한 채 말 속도를 tempo배로(WSOLA, audiotsm). 조각 QWEN_TTS_TSM_FRAME_MS(기본 40 ms)·겹침 50%·탐색 ±QWEN_TTS_TSM_TOL_MS(기본 15 ms).
-    한 객체가 청크 사이 상태를 들고 있어 청크로 나눠 넣어도 한 번에 넣은 것과 같은 결과(이음매 없음).
+    한 객체가 청크 사이 상태를 들고 있어 청크 경계에 이음매(끊김·클릭)는 없다. 다만 WSOLA 조각 탐색 위치가
+    입력 분할에 따라 달라져 한 번에 넣은 것과 샘플 단위로 같지는 않다(정렬 차이 ±13 ms 정도).
     tempo == 1.0이면 그대로 통과."""
 
     def __init__(self, sr: int, tempo: float = 1.0, frame_ms: float = config.QWEN_TTS_TSM_FRAME_MS,
@@ -213,19 +214,25 @@ class QwenPostProcessor:
         self.fade_n = max(0, int(sr * fade_ms / 1000))  # 문장 끝 페이드(경계의 딱 소리 방지)
         self.fade_in_n = max(0, int(sr * config.TTS_FADE_IN_MS / 1000))  # 문장 시작 페이드(더 길게)
         self._faded_in = self.fade_in_n == 0
+        self._fade_k = 0   # 이미 적용한 페이드인 샘플 수(소리가 청크 끝에서 시작해도 다음 청크로 이어 적용)
 
     def _finish(self, y: np.ndarray, last: bool = False) -> np.ndarray:
         if y.size == 0:
             return np.zeros(0, dtype=np.int16)
         y = soft_limit(y * self.gain, self.peak_db)
         if not self._faded_in:
-            nz = np.flatnonzero(np.abs(y) > 1e-3)   # 앞에 남긴 무음(lead)은 건너뛰고 소리가 시작되는 곳부터 페이드
-            if nz.size:
-                i0 = int(nz[0])
-                n = min(self.fade_in_n, y.size - i0)
+            if self._fade_k:
+                i0 = 0                                  # 앞 청크에서 시작한 페이드인을 이어서
+            else:
+                nz = np.flatnonzero(np.abs(y) > 1e-3)   # 앞에 남긴 무음(lead)은 건너뛰고 소리가 시작되는 곳부터 페이드
+                i0 = int(nz[0]) if nz.size else -1
+            if i0 >= 0:
+                n = min(self.fade_in_n - self._fade_k, y.size - i0)
+                ramp = (np.arange(self._fade_k, self._fade_k + n, dtype=np.float64) / self.fade_in_n).astype(np.float32)
                 y = y.copy()
-                y[i0:i0 + n] *= np.linspace(0.0, 1.0, n, endpoint=False, dtype=np.float32)
-                self._faded_in = True
+                y[i0:i0 + n] *= ramp
+                self._fade_k += n
+                self._faded_in = self._fade_k >= self.fade_in_n
         if last and self.fade_n:
             nz = np.flatnonzero(np.abs(y) > 10 ** (-50 / 20))
             end = int(nz[-1]) + 1 if nz.size else y.size      # 마지막 소리 샘플까지를 페이드아웃

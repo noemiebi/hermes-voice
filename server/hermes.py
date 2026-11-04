@@ -75,9 +75,20 @@ class HermesClient:
             return False
 
     async def chat_stream(self, text: str, session_id: str, model: str,
-                          on_delta: DeltaCb, on_tool: ToolCb) -> TurnResult:
-        if self.mock:
-            return await self._mock_stream(text, session_id, on_delta, on_tool)
+                          on_delta: DeltaCb, on_tool: ToolCb, max_s: Optional[float] = None) -> TurnResult:
+        """한 턴 응답 스트림. 전체가 max_s(기본 HERMES_TURN_MAX_S)를 넘으면 HermesError(읽기 타임아웃은 토큰 사이 간격만 봄)."""
+        limit = config.HERMES_TURN_MAX_S if max_s is None else max_s
+        try:
+            async with asyncio.timeout(limit if limit and limit > 0 else None):
+                if self.mock:
+                    return await self._mock_stream(text, session_id, on_delta, on_tool)
+                return await self._chat_stream(text, session_id, model, on_delta, on_tool)
+        except TimeoutError:
+            log.warning("헤르메스 응답 %.0f초 초과 -> 턴 종료", limit)
+            raise HermesError(f"답이 너무 오래 걸려서 멈췄어요({limit:.0f}초 초과)") from None
+
+    async def _chat_stream(self, text: str, session_id: str, model: str,
+                           on_delta: DeltaCb, on_tool: ToolCb) -> TurnResult:
         headers = {"Authorization": f"Bearer {self.api_key}", "Accept": "text/event-stream",
                    "X-Hermes-Session-Id": session_id}
         body = {"model": model, "stream": True,

@@ -71,7 +71,13 @@ FILLER_STYLE_SENTENCES = 6  # auto 판정에 보는 최근 답 문장 수
 # 문장 끝(문장부호 제거 뒤) 판정. 존댓말을 먼저 본다(예: "니다"는 "다"보다, "니까"는 "까"보다 먼저)
 _FORMAL_ENDS = ("요", "죠", "니다", "니까", "십시오", "시오")
 _CASUAL_ENDS = ("어", "아", "야", "지", "다", "래", "네", "군", "까", "게", "자", "냐",
-                "라", "해", "돼", "줘", "봐", "와", "워", "거든", "걸")
+                "라", "해", "돼", "줘", "봐", "와", "워", "거든", "걸",
+                "냐고", "다고", "라고", "자고", "고")  # 인용형 종결('택배 있냐고')·'…해주고'
+# 사용자 말이 존댓말인지(채움 말 문체 근거가 없을 때 사용자 말로 판정)
+_USER_POLITE_ENDS = ("요", "죠", "니다", "니까", "세요", "습니까", "십시오")
+# 받아쓴 말이 덜 끝났는지(연결 어미로 끝남): 이어지는 말과 합치려고 잠깐 더 기다린다
+_CONNECTIVE_ENDS = ("고", "는데", "은데", "인데", "서", "면", "랑", "하고", "이랑", "거나", "지만", "니까")
+_QUOTE_FINAL_ENDS = ("냐고", "다고", "라고", "자고")  # 인용형 종결: 문장이 끝난 것
 _SENT_SPLIT_RE = re.compile(r"(?<=[.!?。！？…~])\s+|\n+")
 _END_STRIP_RE = re.compile(r"[^0-9A-Za-z가-힣]+$")
 
@@ -86,6 +92,49 @@ def _sentence_style(sentence: str) -> Optional[str]:
     if t.endswith(_CASUAL_ENDS):
         return "casual"
     return None
+
+
+def user_style_of(text: str) -> Optional[str]:
+    """사용자 말(노트 붙이기 전 원문) 끝으로 문체. 한글로 끝나고 존댓말 어미가 없으면 casual, 존댓말이면 formal,
+    한글로 안 끝나면 None."""
+    t = _END_STRIP_RE.sub("", (text or "").strip())
+    if not t or not re.search(r"[가-힣]$", t):
+        return None
+    return "formal" if t.endswith(_USER_POLITE_ENDS) else "casual"
+
+
+def _jong(ch: str) -> int:
+    """한글 음절의 받침 번호(0 = 없음, 17 = ㅂ). 한글 음절이 아니면 -1."""
+    o = ord(ch) - 0xAC00
+    return o % 28 if 0 <= o < 11172 else -1
+
+
+# 짧은 말(≤ 3자)이 이 글자로 끝나면 끝난 답으로 본다(기다리지 않음)
+_SHORT_FINAL = set("요다어아야지네응래줘까니게자워와해돼죠데냐군걸뭐왜임음엉웅넹")
+
+
+def looks_unfinished(text: str) -> bool:
+    """받아쓴 말이 덜 끝난 듯한지: 연결 어미(…고, …는데, …면 등)로 끝나거나 아주 짧음(≤ 3자).
+    '…냐고/다고/라고/자고'(인용형 종결)와 '…습니까/합니까'(ㅂ니까), 물음표로 끝난 말은 끝난 것으로 본다."""
+    raw = (text or "").strip()
+    if not raw:
+        return False
+    if re.search(r"[?？]\s*$", raw):
+        return False
+    t = _END_STRIP_RE.sub("", raw)
+    n = re.sub(r"[\W_]+", "", t)
+    if not n:
+        return False
+    if t.endswith(_QUOTE_FINAL_ENDS):
+        return False
+    if len(n) <= 3:
+        # 아주 짧은 말: '오늘'처럼 끊긴 조각이면 기다리고, '네'·'응'·'그래'·'고마워'처럼 끝난 답은 바로 보낸다
+        return not re.search(r"[가-힣]$", t) or t[-1] not in _SHORT_FINAL
+    if not re.search(r"[가-힣]$", t):
+        return False
+    if t.endswith("니까") and len(t) >= 3 and _jong(t[-3]) == 17:  # 합니까·습니까(존댓말 의문 종결)
+        return False
+    return t.endswith(_CONNECTIVE_ENDS)
 
 
 def filler_style_of(texts, limit: int = FILLER_STYLE_SENTENCES) -> tuple[str, int]:
@@ -188,9 +237,14 @@ class VoiceSession:
         self.endpointer: Optional[Endpointer] = None
         self._carry = b""                 # 받아쓰는 중 말이 이어지면 앞 발화를 붙여 다시 처리
         self._turn_pcm = b""
+        self._replace_transcript = False  # 다음 턴 전사가 앞 전사를 대신함(받아쓰기 뒤 말 이어짐 합치기)
+        self._turn_end_at = -1e9          # 지금 턴을 연 발화가 끝난 시각(clock). 말 이어짐 합치기 창(TURN_MERGE_WINDOW_S)
+        self._speech_at = -1e9            # 지금(마지막) 발화가 시작된 시각(clock)
+        self._last_play = -1e9            # 마지막으로 재생 중이었던 시각(clock): 전역 에코 규칙 적용 창
+        self._sent = {"gen": -1, "ms": 0.0}  # 이 generation에 보낸(참조에 붙인) 오디오 누적 길이(ms): 문장별 시작 위치
         self._speech_wall: Optional[float] = None
         # 끼어들기 뒤 헤르메스에 알릴 노트
-        self._answer = {"gen": 0, "heard": [], "done": False}
+        self._answer = {"gen": 0, "heard": [], "starts": [], "done": False}
         self._interrupt_note: Optional[str] = None
         # 스피커 에코 대책
         self.clock = time.monotonic
@@ -332,8 +386,19 @@ class VoiceSession:
             pass
         return False
 
+    def _speaker_done(self, task: asyncio.Task) -> None:
+        """스피커 태스크가 연결 중에 죽으면(취소 아님) 로그로 남긴다."""
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is not None:
+            log.error("스피커 태스크가 예외로 끝남", exc_info=exc)
+        elif not self._closed:
+            log.error("스피커 태스크가 예기치 않게 끝남")
+
     async def run(self) -> None:
         self.speaker_task = asyncio.create_task(self._speaker())
+        self.speaker_task.add_done_callback(self._speaker_done)
         try:
             if config.VOICE_TOKEN and not await self._authenticate():
                 return
@@ -347,7 +412,10 @@ class VoiceSession:
                     await self._on_text(msg["text"])
         finally:
             self._closed = True
+            # 연결이 끊긴 뒤 남은 판정(hold·에코 받아쓰기)이 보이지 않는 새 턴(실제 헤르메스 요청)을 열지 않게
+            self._clear_hold()
             self._cancel_echo_task()
+            self.generation += 1
             await self._cancel_turn()
             if self.speaker_task:
                 self.speaker_task.cancel()
@@ -535,9 +603,11 @@ class VoiceSession:
             self._duck_echo = {"at": self.clock(), "gen": gen, "pre_db": pre,
                                "rechecked": bool(prev and prev.get("rechecked")), "run": 0, "gap": 0, "best": 0}
         else:
-            log.info("덕킹 검사(%s): pre %.1f dB -> %.1f dB (%.1f dB 하강, hold 뒤 %.0f ms) -> 사용자 말, 끼어들기 확정",
+            log.info("덕킹 검사(%s): pre %.1f dB -> %.1f dB (%.1f dB 하강, hold 뒤 %.0f ms) -> 사용자 말 쪽",
                      how, pre, val, pre - val, took)
-            await self.interrupt(announce=False, notify=True)
+            # 바로 끊지 않는다(실기: '사용자 말' 확정 6건 중 3건이 에코). 재생을 멈춰(일시정지 hold) 에코를 없앤 뒤
+            # 말이 HOLD_CONFIRM_MS 더 이어지거나 말 끝 STT가 진짜 말이면 그때 끼어들기, 에코면 이어서 재생.
+            await self._duck_to_pause("덕킹 검사: 사용자 말 쪽")
 
     async def _net_nudge_loop(self) -> None:
         """대화가 켜진 동안 NET_NUDGE_S마다 클라이언트에게 tailscale ping(직접 경로 유지). 경로가 바뀌면 로그."""
@@ -866,6 +936,20 @@ class VoiceSession:
                      now - tx["t1"], self.out_codec, self.out_rate)
             asyncio.create_task(self._log_netpath())  # Tailscale 경로(직접/릴레이) 참고 로그
 
+    def _can_merge_prev(self) -> bool:
+        """받아쓰기가 끝난 앞 턴에 새 발화를 합쳐도 되는지: 앞 발화가 TURN_MERGE_WINDOW_S 안에 끝났고,
+        이 generation이 첫 토큰도 오디오도 아직 안 냈고, 재생·보낼 문장도 없음."""
+        if not self._turn_running() or not self._turn_pcm:
+            return False
+        if self.clock() - self._turn_end_at > config.TURN_MERGE_WINDOW_S:
+            return False
+        a = self._answer
+        if a.get("gen") == self.generation and a.get("first_tok"):
+            return False
+        if self._tx["gen"] == self.generation and self._tx["bytes"] > 0:
+            return False
+        return self.queue.empty() and not self._speaking_now and not self._playing() and not self._stale_playing()
+
     def _barge_mode(self) -> bool:
         """끼어들기 기준(엄격)을 쓸 상황: 턴이 생각·말하는 중이거나, 보낼 문장이 남았거나, 스피커 재생 중.
         stale한 state 값은 보지 않는다. hold 중에는 재생이 멈춰 있으니 엄격하지 않게."""
@@ -902,15 +986,21 @@ class VoiceSession:
                 self.endpointer.reset()
             self._carry = b""
             busy = self._turn_running() or self.state in ("thinking", "speaking") or self._playing() \
-                or self.holding or not self.queue.empty()
+                or self.holding or not self.queue.empty() or self._echo_task is not None or self._stale_playing()
             if busy:
                 await self.interrupt(announce=False, notify=True)
+            # 받아쓰는 중인 판정(에코 검사·hold)이 대화를 끈 뒤 새 턴을 열지 않게 항상 정리
+            self._cancel_echo_task()
+            self._clear_hold()
+            self._pitch_wait = self._pitch_tts = None
+            self._duck_skip = self._duck_echo = None
             await self.set_state("idle")
             log.info("conversation off")
 
     async def _on_vad(self, ev: VADEvent) -> None:
         if ev.kind == "start":
             self._speech_wall = time.perf_counter()
+            self._speech_at = self.clock()
             # 재생 중이거나 재생이 막 끝난 뒤 시작된 말은 받아쓴 뒤 에코인지 본다
             self._echo_check = self._playing() or self.clock() < self._tail_until or self._stale_playing()
             self._duck_skip = None
@@ -942,13 +1032,19 @@ class VoiceSession:
                 self._hold_task = None
                 self._hold_base_ms = 0
                 self._echo_check = True
-            elif self.state == "transcribing" and self._turn_running():
-                # 끝 침묵 뒤 말이 이어짐: 받아쓰던 발화를 새 발화 앞에 붙인다
+            elif self._turn_running() and (self.state == "transcribing" or self._can_merge_prev()):
+                # 끝 침묵 뒤 말이 이어짐: 받아쓰던 발화를 새 발화 앞에 붙인다.
+                # 받아쓰기가 끝났어도 앞 발화가 TURN_MERGE_WINDOW_S 안에 끝났고 답(첫 토큰·오디오)이 아직이면
+                # 끼어들기(앞 질문 버림 + '끊었음' 노트) 대신 같은 방식으로 합친다(실기: '오늘 일정 요약해주고'가 잘림)
+                merged_after_stt = self.state != "transcribing"
+                if merged_after_stt:
+                    self._replace_transcript = True  # 앞 발화 전사는 이미 보냄: 합친 전사가 그걸 대신함(replace_last)
                 self._carry = self._turn_pcm
                 self._echo_check = self._echo_check or self._turn_echo
                 self.generation += 1
                 await self._cancel_turn()
-                log.info("말 이어짐: 앞 발화 %.1f s 붙임", len(self._carry) / 32000)
+                log.info("말 이어짐%s: 앞 발화 %.1f s 붙임", "(받아쓰기 뒤, 답 전)" if merged_after_stt else "",
+                         len(self._carry) / 32000)
             elif self._playing() or (ev.barge and self.clock() < self._tail_until):
                 # 스피커 소리(또는 그 꼬리)일 수 있음: 재생만 멈추고 진짜 말인지 판정(generation 유지).
                 # 경계 시점에 일반 모드로 시작이 났어도 실제 재생 중이면 반드시 hold로 보낸다.
@@ -1099,8 +1195,28 @@ class VoiceSession:
             await self.set_state(self.rest_state())
 
     async def _confirm_hold(self) -> None:
+        if self._hold_mode == "duck":
+            # 덕킹 중에는 낮춘 재생 소리(에코)도 '말이 이어짐'으로 잡힌다: 확정 대신 일시정지로 바꿔 다시 잰다
+            await self._duck_to_pause(f"hold(duck): 말이 {self.hold_confirm_ms} ms 넘게 이어짐")
+            return
         log.info("hold: 말이 %d ms 넘게 이어짐 -> 끼어들기 확정", self.hold_confirm_ms)
         await self.interrupt(announce=False, notify=True)
+
+    async def _duck_to_pause(self, why: str) -> None:
+        """덕킹 hold를 일시정지 hold로 바꾼다: 클라이언트는 재생을 멈추고 남은 오디오를 보관, 서버는 송신을 멈춘다.
+        재생이 멈추면 에코가 사라지므로, 그 뒤에도 말이 HOLD_CONFIRM_MS 이어지면(_confirm_hold) 사용자 말로 확정하고,
+        말이 먼저 끝나면 STT 판정(_resolve_pending "hold")이 에코면 resume(보관분 재생), 진짜 말이면 끼어들기."""
+        gen = self._hold_gen
+        if not self.holding or gen != self.generation or self._hold_mode != "duck":
+            return
+        self._duck = None
+        self._hold_mode = "pause"
+        self._hold_at = self.clock()
+        self._hold_base_ms = self._confirm_ms()
+        self._hold_event.clear()
+        self.timeline.stop(self._hold_at)
+        await self.send_json({"type": "hold", "generation": gen})
+        log.info("%s -> 일시정지 hold로 전환(이어지는 말·STT로 판정)", why)
 
     def _echo_filter(self, text: str, echo_check: bool, short_echo: Optional[float] = None
                      ) -> Optional[tuple[str, str]]:
@@ -1108,6 +1224,13 @@ class VoiceSession:
         echo_check: 최근 문장 비교(echo.reason, 원문·독음) + 퍼지 규칙(echo.fuzzy_reason). short_echo: 짧은 조각 완화 기준(게이트 에코 비율, None이면 안 씀).
         전역 규칙(길고 거의 같은 문장)은 항상."""
         if not text:
+            return None
+        # 재생 중 에코 검사 대상(echo_check)이면 '답에 없는 낱말' 규칙은 쓰지 않는다: 받아쓰기가 뭉갠 자기 목소리
+        # ('잠시만 찾아볼게 알겠어')도 새 낱말로 보여 통과될 수 있다. 질문·요청 어미 규칙만 쓴다.
+        extra = self.echo.user_content_reason(text, extra_words=not echo_check)
+        if extra:
+            # 답 문장에 없는 질문·요청 어미나 새 낱말이 있으면 답을 따라 말한 사용자 질문(실기: '…나오냐고', '…뭐야')
+            log.info("에코 검사 건너뜀(사용자 내용: %s): %r", extra, text)
             return None
         if echo_check:
             reason = self.echo.reason(text)
@@ -1122,10 +1245,26 @@ class VoiceSession:
             lreason = self.echo.lenient_reason(text, bigram=big)
             if lreason:
                 return "에코 무시(짧은 조각)", f"{lreason}, 게이트 에코 비율 {short_echo:.2f}"
-        greason = self.echo.global_reason(text)
-        if greason:  # 재생 꼬리와 무관: 길고 거의 같은 문장
-            return "에코 무시(전역)", greason
+        # 전역 규칙(길고 거의 같은 문장): 재생 중이거나 재생이 끝난 뒤 ECHO_GLOBAL_WINDOW_S 안에 시작된 발화에만.
+        # 한참 뒤 사용자가 답의 낱말을 되짚어 묻는 말을 버리지 않게(실기: '내일 아침 9시에 개표 결과가 나오냐고')
+        if echo_check or self._near_playback():
+            greason = self.echo.global_reason(text)
+            if greason:
+                return "에코 무시(전역)", greason
         return None
+
+    def _note_play(self) -> None:
+        """재생 중임을 본 시각을 남긴다(전역 에코 규칙 창)."""
+        self._last_play = self.clock()
+
+    def _near_playback(self) -> bool:
+        """지금 발화가 재생 중이거나 재생 끝(마지막 재생 보고·추정 재생 끝) 뒤 ECHO_GLOBAL_WINDOW_S 안에 시작됐는지."""
+        last = self._last_play
+        if not self._aec_on:  # pos_ms 없는 옛 클라이언트: 보낸 길이로 추정한 재생 끝
+            last = max(last, min(self._play_until, self.clock()))
+        if self._playing() or self._stale_playing():
+            return True
+        return self._speech_at - last <= config.ECHO_GLOBAL_WINDOW_S
 
     async def _resolve_pending(self, kind: str, gen: int, pcm: bytes, short_echo: Optional[float] = None) -> None:
         """재생을 그대로 둔 채 끝난 발화를 받아써서 판정(공용). 에코·빈 결과면 재생 계속, 진짜 말이면
@@ -1220,6 +1359,7 @@ class VoiceSession:
                 await self.interrupt(announce=False)
             self.audio = bytearray()
             self.listening = True
+            self._speech_at = self.clock()
             await self.set_state("listening")
         elif t == "end_utterance":
             if not self.listening:
@@ -1252,6 +1392,10 @@ class VoiceSession:
             lat = float(lat) if isinstance(lat, (int, float)) and not isinstance(lat, bool) and 0 <= lat < 1000 else 0.0
             if pos is not None:
                 pos -= lat  # 스피커에서 실제로 나오는 위치(출력 지연만큼 뒤)
+            if st == "speaking":
+                self._note_play()
+            elif st == "idle" and self.playback == "speaking":
+                self._note_play()
             if st == "speaking" and self._stale_floor <= g < self.generation:
                 # 끼어들기 없이 턴이 바뀌었는데(말 끝 -> 새 턴) 클라이언트가 옛 답을 아직 재생 중: 에코 검사 대상
                 self._stale_play = self.clock()
@@ -1294,7 +1438,7 @@ class VoiceSession:
         elif t == "log":
             # 화면 대화 기록 한 줄(클라이언트 logItem). 응답 없음.
             if self.store:
-                self.store.append(self.session_id, msg.get("item"))
+                self.store.append(self.session_id, msg.get("item"), replace_last=msg.get("replace_last") is True)
         elif t == "new_session":
             await self.interrupt(announce=False)
             self._interrupt_note = None
@@ -1332,12 +1476,18 @@ class VoiceSession:
         m["texts"].append(text)
         del m["texts"][:-FILLER_STYLE_SENTENCES]  # 답 하나가 최소 한 문장이라 이만큼이면 충분
 
-    def _filler_style(self) -> str:
-        """이번 턴 채움 말 문체(config.FILLER_STYLE: formal|casual|auto). auto는 매 턴 최근 답 문장 끝으로 다시 판정."""
+    def _filler_style(self, user_text: str = "") -> str:
+        """이번 턴 채움 말 문체(config.FILLER_STYLE: formal|casual|auto). auto는 매 턴 최근 답 문장 끝으로 다시 판정.
+        답 근거가 없으면 이번 사용자 말(user_text, 노트 붙이기 전 원문)의 끝으로: 존댓말 어미가 없으면 반말."""
         want = config.FILLER_STYLE
         if want in ("formal", "casual"):
             return want
         style, n = filler_style_of(self._recent_replies())
+        if n == 0:
+            us = user_style_of(user_text)
+            if us is not None:
+                log.info("채움 말 문체: %s (답 근거 없음, 사용자 말 끝으로)", us)
+                return us
         log.info("채움 말 문체: %s (근거 %d문장)", style, n)
         return style
 
@@ -1374,7 +1524,15 @@ class VoiceSession:
         playing = self._playing() or not self.queue.empty()
         if not (turn_running or playing or (a["heard"] and not a["done"])):
             return
-        heard = " ".join(a["heard"]).strip()
+        items = list(a["heard"])
+        starts = a.get("starts") or []
+        pos = self._played_pos_ms(self.generation)
+        if pos is not None and len(starts) == len(items):
+            # pos_ms 클라이언트: 보낸 문장이 아니라 스피커에서 재생이 시작된 문장만 '들은 부분'으로
+            items = [x for x, st in zip(items, starts) if st < pos]
+        elif self._aec_on and len(starts) == len(items) and self.timeline.gen != self.generation:
+            items = []  # 이 답은 아직 재생 보고가 없음 = 아직 안 들림
+        heard = " ".join(items).strip()
         if heard:
             if len(heard) > HEARD_NOTE_CHARS:
                 heard = "…" + heard[-HEARD_NOTE_CHARS:]
@@ -1404,21 +1562,31 @@ class VoiceSession:
     # ---------- 턴 ----------
     def _start_turn(self, pcm: Optional[bytes] = None, text: Optional[str] = None,
                     echo_check: bool = False, short_echo: Optional[float] = None) -> None:
+        if self._closed:  # 연결이 끊긴 뒤에는 새 턴(헤르메스 요청)을 열지 않는다
+            return
         self._clear_hold()
         self._cancel_echo_task()
         self._duck_echo = None
         self.generation += 1
         self._drain_queue()
+        old = self.turn_task
+        if old and not old.done() and old is not asyncio.current_task():
+            old.cancel()  # 앞 턴을 덮어쓰기 전에 끊는다(남아 돌면 그 finally가 새 턴 상태를 건드림)
         self._turn_pcm = pcm or b""
+        self._turn_end_at = self.clock() if pcm else -1e9
         self._turn_echo = echo_check
-        self.turn_task = asyncio.create_task(self._turn(self.generation, pcm, text, echo_check, short_echo))
+        replace, self._replace_transcript = self._replace_transcript and pcm is not None, False
+        self.turn_task = asyncio.create_task(self._turn(self.generation, pcm, text, echo_check, short_echo,
+                                                        replace=replace))
 
     async def _turn(self, gen: int, pcm: Optional[bytes], text: Optional[str], echo_check: bool = False,
-                    short_echo: Optional[float] = None) -> None:
+                    short_echo: Optional[float] = None, replace: bool = False) -> None:
         """short_echo: 재생 중 시작된 짧은 발화(음성 ≤ SHORT_ECHO_MS)의 게이트 에코 비율. None이 아니면 STT 결과를
         완화 기준(echo.lenient_reason)으로 한 번 더 거른다: 숫자·단위만 있는 전사는 항상, bigram 완화는 비율 ≥
         SHORT_ECHO_FRAC일 때만."""
         t0 = time.perf_counter()
+        if self._closed:
+            return
         try:
             if text is None:
                 await self.set_state("transcribing")
@@ -1434,7 +1602,18 @@ class VoiceSession:
                     log.info("%s: %r (%s, STT %d ms)", filt[0], text, filt[1], ms)
                     await self.set_state(self.rest_state())
                     return
-                await self.send_json({"type": "transcript", "text": text, "ms": ms})
+                wait = config.TURN_CONTINUE_WAIT_MS / 1000
+                if wait > 0 and self.conversation and text and looks_unfinished(text):
+                    # 덜 끝난 말('…해주고', '오늘'): 'transcribing'을 유지한 채 잠깐 기다려 이어지는 말을 합친다
+                    # (그 사이 말이 시작되면 _on_vad의 말 이어짐 분기가 이 턴을 끊고 두 발화를 같이 받아씀)
+                    log.info("말이 덜 끝난 듯: %r -> %d ms 더 기다림", text, config.TURN_CONTINUE_WAIT_MS)
+                    await asyncio.sleep(wait)
+                    if gen != self.generation:
+                        return
+                msg = {"type": "transcript", "text": text, "ms": ms}
+                if replace:
+                    msg["replace_last"] = True  # 앞서 보낸 전사(합쳐진 앞 발화)를 이 전사로 바꿔 보여도 됨
+                await self.send_json(msg)
                 log.info("STT %d ms: %r", ms, text)
                 if not text:
                     await self.set_state(self.rest_state())
@@ -1470,6 +1649,7 @@ class VoiceSession:
         if self.session_id:  # 끊기거나 실패한 턴도 활동으로 친다(끝나면 다시 갱신)
             _LAST_TURN[self.session_id] = time.time()
         splitter = SentenceSplitter()
+        user_text = text  # 노트 붙이기 전 사용자 말(채움 말 문체 판정)
         if self.style_note:
             # 모델은 자기가 무슨 모델인지 모르므로(빠름 모드에서 Opus라고 주장한 실기 사례) 실제 라우팅 모델을 알려 준다.
             note = self.style_note
@@ -1481,16 +1661,28 @@ class VoiceSession:
             text = f"{self._interrupt_note}\n{text}"
             log.info("끊긴 답 노트 붙임: %s", self._interrupt_note)
             self._interrupt_note = None
-        self._answer = {"gen": gen, "heard": [], "done": False, "thinking": True, "first_tok": False}
+        self._answer = {"gen": gen, "heard": [], "starts": [], "done": False, "thinking": True, "first_tok": False}
         spoke = {"any": False}
         first = {"tok": None}
         fill = {"tool": None, "used": set(), "generic": 0, "n": 0, "wake": asyncio.Event()}
-        fstyle = self._filler_style() if config.FILLER_ENABLED else "formal"
+        fstyle = self._filler_style(user_text) if config.FILLER_ENABLED else "formal"
         f_first, _, _, f_generic = FILLER_SETS[fstyle]
 
         def enqueue(sentence: str) -> None:
             spoke["any"] = True
             self.queue.put_nowait((gen, sentence))
+
+        mine: dict = {"filler": None}  # 이 턴의 채움 말 태스크
+
+        def stop_my_filler() -> None:
+            """이 턴의 채움 말만 끈다(다른 턴이 새로 건 _filler_task는 건드리지 않음)."""
+            task = mine["filler"]
+            if task is None:
+                return
+            if self._filler_task is task:
+                self._filler_task = None
+            if not task.done() and task is not asyncio.current_task():
+                task.cancel()
 
         async def on_delta(delta: str) -> None:
             if gen != self.generation:
@@ -1498,7 +1690,7 @@ class VoiceSession:
             if first["tok"] is None:
                 first["tok"] = time.perf_counter()
                 self._answer["first_tok"] = True  # 큐의 안 읽은 채움 말은 _speaker가 건너뜀
-                self._cancel_filler()
+                stop_my_filler()
                 log.info("첫 토큰 %.0f ms (턴 시작부터)", (first["tok"] - t0) * 1000)
             await self.send_json({"type": "assistant_delta", "text": delta})
             for s in splitter.feed(delta):
@@ -1564,18 +1756,19 @@ class VoiceSession:
 
         self._cancel_filler()
         if config.FILLER_ENABLED:
-            self._filler_task = asyncio.create_task(filler_loop())
+            self._filler_task = mine["filler"] = asyncio.create_task(filler_loop())
         try:
             result = await self.hermes.chat_stream(text, self.session_id, self.model, on_delta, on_tool)
         except (HermesError, httpx.HTTPError) as e:
             msg = str(e) or type(e).__name__
             if isinstance(e, httpx.ConnectError):
                 msg = "헤르메스 API에 연결할 수 없어요"
-            await self.send_json({"type": "error", "message": msg})
-            self.queue.put_nowait((gen, _END))
+            if gen == self.generation:
+                await self.send_json({"type": "error", "message": msg})
+                self.queue.put_nowait((gen, _END))
             return
         finally:
-            self._cancel_filler()
+            stop_my_filler()
         if gen != self.generation:
             return
         for s in splitter.flush():
@@ -1657,12 +1850,14 @@ class VoiceSession:
                     await self.send_json({"type": "speak_start", "generation": gen, "text": item})
                     if self._answer["gen"] == gen and not _is_filler(item):
                         self._answer["heard"].append(item)
+                        self._answer["starts"].append(self._sent_ms(gen))
                     if self._sched_gen != gen:
                         self._sched_gen, self._sched = gen, []
                     st0 = max(self._sched[-1][0] + self._sched[-1][1], self.clock()) if self._sched else self.clock()
                     self._sched.append((st0, 0.0))
                     started = True
                 self.aec_ref.add(gen, pcm)
+                self._add_sent(gen, len(pcm))
                 total += len(pcm)
                 if self._sched_gen == gen and self._sched:
                     self._sched[-1] = (st0, total / self.out_rate)
@@ -1685,6 +1880,24 @@ class VoiceSession:
                      first_ms or 0, int((time.perf_counter() - t0) * 1000), total / self.out_rate, item)
         return started
 
+    def _sent_ms(self, gen: int) -> float:
+        """이 generation에 지금까지 보낸 오디오 길이(ms) = 다음 문장의 재생 위치(pos_ms) 시작."""
+        return self._sent["ms"] if self._sent["gen"] == gen else 0.0
+
+    def _add_sent(self, gen: int, n_samples: int) -> None:
+        if self._sent["gen"] != gen:
+            self._sent = {"gen": gen, "ms": 0.0}
+        self._sent["ms"] += n_samples * 1000.0 / self.out_rate
+
+    def _played_pos_ms(self, gen: int) -> Optional[float]:
+        """클라이언트가 보고한 이 generation 재생 위치(지금 추정, 멈췄으면 마지막 위치). pos_ms가 없으면 None."""
+        if not self._aec_on or self.timeline.gen != gen:
+            return None
+        p = float(self.timeline.pos_at(np.array([self.clock()]))[0])
+        if np.isfinite(p):
+            return p
+        return self.timeline.last_pos
+
     async def _filler_gap(self, gen: int, filler_end: float) -> None:
         """채움 말을 재생한 답의 첫 본문 문장 전: 채움 말 재생 끝 + FILLER_GAP_S까지 기다린다.
         끼어들기·interrupt로 generation이 바뀌면 즉시 돌아간다."""
@@ -1706,81 +1919,91 @@ class VoiceSession:
         filler_gen, filler_end = None, 0.0  # 채움 말을 재생한 generation과 그 재생 끝 추정 시각(clock)
         gap_gen = None  # 채움 말 뒤 여유를 이미 둔 generation(답마다 첫 본문 문장 한 번)
         while True:
-            gen, item = await self._next_item()
-            if gen != self.generation:
-                continue
-            if item is _END:
-                await self._wait_hold(gen)
-                if gen != self.generation:
-                    continue
-                if sent_gen == gen:
-                    await self.send_json({"type": "speak_end", "generation": gen})
-                    if not self._aec_on:  # pos_ms 클라이언트는 실제 idle 보고 때 꼬리 가드를 시작
-                        self._tail_until = max(self._tail_until, max(self._play_until, self.clock()) + self.echo_tail_s)
-                await self.set_state(self.rest_state())
-                continue
-            if _is_filler(item) and self._answer["gen"] == gen and self._answer.get("first_tok"):
-                log.info("채움 말 건너뜀: 답 도착: %s", item)
-                continue
-            if not self.tts.loaded:
-                await self.send_json({"type": "error", "message": "TTS가 아직 준비되지 않았어요"})
-                continue
-            try:  # 독음 정규화는 합성·에코 메모리(독음 비교)에 쓴다(자막 speak_start·heard는 원문 item)
-                spoken = normalize_for_tts(item)
-            except Exception:  # noqa: BLE001
-                log.exception("독음 정규화 실패, 원문으로 합성")
-                spoken = item
-            if spoken != item:
-                log.debug("독음: %s -> %s", item, spoken)
-            if not spoken:
-                continue  # 기호만 있던 문장은 읽지 않는다
-            if not _is_filler(item) and filler_gen == gen and gap_gen != gen:
-                gap_gen = gen
-                await self._filler_gap(gen, filler_end)
-                if gen != self.generation:
-                    continue
-            self._speaking_now = True
+            # 문장 하나 처리 중 예외가 나도 스피커 태스크는 살아 있어야 한다(죽으면 세션이 다시 말하지 못함)
             try:
-                if hasattr(self.tts, "synth_stream"):  # 스트리밍 엔진(TTSRouter: Qwen 또는 Supertonic 폴백)
-                    # 이 답에서 이미 보낸 오디오가 있을 때만 재생 여유를 센다(_play_until은 이전 답의 값이 남을 수 있음)
-                    lead = self._play_lead_s(gen) if sent_gen == gen else 0.0
-                    if await self._speak_stream(gen, item, spoken, lead_s=lead):
-                        sent_gen = gen
-                        if _is_filler(item):
-                            filler_gen, filler_end = gen, self._est_play_end(gen)
-                    continue
-                try:
-                    res = await self.tts.synth(spoken, is_current=lambda g=gen: g == self.generation)
-                except Exception as e:  # noqa: BLE001
-                    log.exception("TTS failed")
-                    await self.send_json({"type": "error", "message": f"TTS 오류: {e}"})
-                    continue
-                if res is None or gen != self.generation:
-                    continue
-                pcm, ms = res
-                log.info("TTS %d ms, %.1f s 음성: %s", ms, len(pcm) / self.out_rate, item)
-                await self._wait_hold(gen)
+                gen, item = await self._next_item()
                 if gen != self.generation:
                     continue
-                if not self.holding:  # 덕킹 hold 중에는 판정 상태(listening)를 유지
-                    await self.set_state("speaking")
-                await self.send_json({"type": "speak_start", "generation": gen, "text": item})
-                self.aec_ref.add(gen, pcm)  # 에코 대조용 참조(이 generation 위치 0부터 이어 붙임)
-                if self._answer["gen"] == gen and not _is_filler(item):
-                    self._answer["heard"].append(item)
-                sent_gen = gen
-                if self._sched_gen != gen:
-                    self._sched_gen, self._sched = gen, []
-                st0 = max(self._sched[-1][0] + self._sched[-1][1], self.clock()) if self._sched else self.clock()
-                self._sched.append((st0, len(pcm) / self.out_rate))
-                self._play_until = max(self._play_until, self.clock()) + len(pcm) / self.out_rate
-                self.echo.add(item, spoken, end=self._est_play_end(gen))  # 보관은 추정 재생 종료부터
-                for i in range(0, len(pcm), self.chunk_samples):
+                if item is _END:
                     await self._wait_hold(gen)
                     if gen != self.generation:
-                        break
-                    await self.send_audio(gen, pcm[i:i + self.chunk_samples])
-                if _is_filler(item):
-                    filler_gen, filler_end = gen, self._est_play_end(gen)
-            finally:
+                        continue
+                    if sent_gen == gen:
+                        await self.send_json({"type": "speak_end", "generation": gen})
+                        if not self._aec_on:  # pos_ms 클라이언트는 실제 idle 보고 때 꼬리 가드를 시작
+                            self._tail_until = max(self._tail_until, max(self._play_until, self.clock()) + self.echo_tail_s)
+                    await self.set_state(self.rest_state())
+                    continue
+                if _is_filler(item) and self._answer["gen"] == gen and self._answer.get("first_tok"):
+                    log.info("채움 말 건너뜀: 답 도착: %s", item)
+                    continue
+                if not self.tts.loaded:
+                    await self.send_json({"type": "error", "message": "TTS가 아직 준비되지 않았어요"})
+                    continue
+                try:  # 독음 정규화는 합성·에코 메모리(독음 비교)에 쓴다(자막 speak_start·heard는 원문 item)
+                    spoken = normalize_for_tts(item)
+                except Exception:  # noqa: BLE001
+                    log.exception("독음 정규화 실패, 원문으로 합성")
+                    spoken = item
+                if spoken != item:
+                    log.debug("독음: %s -> %s", item, spoken)
+                if not spoken:
+                    continue  # 기호만 있던 문장은 읽지 않는다
+                if not _is_filler(item) and filler_gen == gen and gap_gen != gen:
+                    gap_gen = gen
+                    await self._filler_gap(gen, filler_end)
+                    if gen != self.generation:
+                        continue
+                self._speaking_now = True
+                try:
+                    if hasattr(self.tts, "synth_stream"):  # 스트리밍 엔진(TTSRouter: Qwen 또는 Supertonic 폴백)
+                        # 이 답에서 이미 보낸 오디오가 있을 때만 재생 여유를 센다(_play_until은 이전 답의 값이 남을 수 있음)
+                        lead = self._play_lead_s(gen) if sent_gen == gen else 0.0
+                        if await self._speak_stream(gen, item, spoken, lead_s=lead):
+                            sent_gen = gen
+                            if _is_filler(item):
+                                filler_gen, filler_end = gen, self._est_play_end(gen)
+                        continue
+                    try:
+                        res = await self.tts.synth(spoken, is_current=lambda g=gen: g == self.generation)
+                    except Exception as e:  # noqa: BLE001
+                        log.exception("TTS failed")
+                        await self.send_json({"type": "error", "message": f"TTS 오류: {e}"})
+                        continue
+                    if res is None or gen != self.generation:
+                        continue
+                    pcm, ms = res
+                    log.info("TTS %d ms, %.1f s 음성: %s", ms, len(pcm) / self.out_rate, item)
+                    await self._wait_hold(gen)
+                    if gen != self.generation:
+                        continue
+                    if not self.holding:  # 덕킹 hold 중에는 판정 상태(listening)를 유지
+                        await self.set_state("speaking")
+                    await self.send_json({"type": "speak_start", "generation": gen, "text": item})
+                    st_ms = self._sent_ms(gen)
+                    self.aec_ref.add(gen, pcm)  # 에코 대조용 참조(이 generation 위치 0부터 이어 붙임)
+                    self._add_sent(gen, len(pcm))
+                    if self._answer["gen"] == gen and not _is_filler(item):
+                        self._answer["heard"].append(item)
+                        self._answer["starts"].append(st_ms)
+                    sent_gen = gen
+                    if self._sched_gen != gen:
+                        self._sched_gen, self._sched = gen, []
+                    st0 = max(self._sched[-1][0] + self._sched[-1][1], self.clock()) if self._sched else self.clock()
+                    self._sched.append((st0, len(pcm) / self.out_rate))
+                    self._play_until = max(self._play_until, self.clock()) + len(pcm) / self.out_rate
+                    self.echo.add(item, spoken, end=self._est_play_end(gen))  # 보관은 추정 재생 종료부터
+                    for i in range(0, len(pcm), self.chunk_samples):
+                        await self._wait_hold(gen)
+                        if gen != self.generation:
+                            break
+                        await self.send_audio(gen, pcm[i:i + self.chunk_samples])
+                    if _is_filler(item):
+                        filler_gen, filler_end = gen, self._est_play_end(gen)
+                finally:
+                    self._speaking_now = False
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001
+                log.exception("스피커: 항목 처리 실패 -> 다음 항목으로")
                 self._speaking_now = False

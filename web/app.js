@@ -4,7 +4,7 @@
 //   끄려면 Safari 콘솔(또는 웹 검사기)에서 localStorage.setItem('hv.keepalive', '0') 후 새로 고침. 다시 켜려면 removeItem.
 'use strict';
 
-const APP_VERSION = '0.7.0';
+const APP_VERSION = '0.8.0';
 const AGENT_NAME_DEFAULT = 'Herbot'; // 서버 ready의 agent_name이 오면 그걸 쓴다
 const KEEPALIVE_LEVEL = 1e-5; // 약 -100 dBFS
 const DIAG_BUF_MAX = 20; // WS가 닫힌 동안 모아 둘 진단 줄 수
@@ -159,6 +159,10 @@ const st = {
   // 시스템 음소거·중단(2026-11-03 21:05 실기: 재생 중 iOS가 track mute → ctx interrupted, 복구 사다리가 헛돌아 zeroFailed)
   muteSince: 0, // 트랙 muted=true가 이어진 시작 시각(진단 sysmute=Ns)
   holdSince: 0, // 대화 중 시스템 음소거·중단(muted 또는 ctx interrupted/suspended)으로 무음 판정을 보류한 시작 시각
+  trackEndedDuringHold: false, // 시스템 중단(ctx interrupted 등) 중에 트랙이 ended됨 → 중단이 풀리면 recoverMic
+  ctxDownSince: 0, // ctx가 running이 아닌 상태(interrupted·suspended)가 시작된 시각(재생 정리·자동 재개 기준)
+  ctxWakeTries: 0, // 대화 중 화면에 보이는데 ctx suspended로 남았을 때 자동 재개를 시도한 횟수
+  ctxWakeAt: 0, // 마지막 자동 재개 시도 시각
   holdEndAt: 0, // 마지막 보류 해제 시각(복귀 뒤 0 샘플이 ZERO_IDLE_MS 이어지면 사다리 재허용). 실제 샘플이 들어오면 0
   deadFails: 0, // 페이지 수명 동안 마이크 복구 최종 실패 횟수(두 번째부터 앱 종료 권유)
   micWatch: 0, // 시작 직후 1.5초 감시 타이머
@@ -238,14 +242,17 @@ function saveChat() {
   try { localStorage.setItem(LS.log, JSON.stringify(st.chat)); } catch { /* 용량 초과 등 무시 */ }
 }
 
-function logItem(r, text, sync = true) {
+// replace: 마지막 항목이 같은 r이면 바꾼다(서버가 앞 발화와 합친 전사를 replace_last로 보낼 때)
+function logItem(r, text, sync = true, replace = false) {
   const t = (text || '').trim();
   if (!t) return;
   const item = { r, t, at: Date.now() };
-  st.chat.items.push(item);
-  if (st.chat.items.length > LOG_MAX) st.chat.items.splice(0, st.chat.items.length - LOG_MAX);
+  const items = st.chat.items;
+  if (replace && items.length && items[items.length - 1].r === r) items.pop();
+  items.push(item);
+  if (items.length > LOG_MAX) items.splice(0, items.length - LOG_MAX);
   saveChat();
-  if (sync) send({ type: 'log', item }); // 닫혀 있으면 생략(나중에 맞춰 보내지 않음)
+  if (sync) send(replace ? { type: 'log', item, replace_last: true } : { type: 'log', item }); // 닫혀 있으면 생략
 }
 
 // 서버 history(hello 뒤 ready 다음에 옴): 서버 기록이 있으면 정본으로 덮어쓰고,
@@ -912,8 +919,17 @@ function onEvent(m) {
       break;
     case 'transcript': {
       removeTyping();
-      const d = addLine('msg me', m.text || '');
-      logItem('user', m.text);
+      // replace_last: 앞 발화와 합쳐 다시 받아쓴 전사 -> 마지막 내 말풍선을 바꾼다(말풍선이 둘로 남지 않게)
+      const mine = el.log.querySelectorAll('.msg.me');
+      const lastMe = mine.length ? mine[mine.length - 1] : null;
+      const bots = el.log.querySelectorAll('.msg.bot');
+      const lastBot = bots.length ? bots[bots.length - 1] : null;
+      // 내 말풍선 뒤에 답 말풍선이 없을 때만 바꾼다(도구 칩·상태 줄은 있어도 됨)
+      const replace = m.replace_last === true && lastMe
+        && (!lastBot || (lastBot.compareDocumentPosition(lastMe) & Node.DOCUMENT_POSITION_FOLLOWING));
+      if (replace) lastMe.textContent = m.text || '';
+      else addLine('msg me', m.text || '');
+      logItem('user', m.text, true, !!replace);
       if (m.ms != null) console.info('[stt]', m.ms, 'ms'); // 진단 수치는 화면 대신 콘솔로
       st.botEl = null;
       endChipTurn();
@@ -1040,6 +1056,10 @@ function onSpeakStart(gen) {
     st.rxSec = 0;
     st.genStarted = false;
     st.underruns = 0;
+  } else if (st.sources.size === 0 && !st.rebuf && !st.held) {
+    // 같은 generation의 다음 문장인데 큐가 비어 있다: 서버 쪽 지연(필러 뒤 LLM 대기, 느린 TTS)이지
+    // 다운링크 끊김이 아니므로 이 문장의 첫 청크는 재버퍼 없이 바로 튼다. 문장 중간 바닥은 그대로 재버퍼.
+    st.genStarted = false;
   }
   st.speakEnded = false;
 }
@@ -1169,6 +1189,8 @@ function onHold(gen) {
     st.rebuf = null;
   }
   st.held = { gen, bufs };
+  // 덕킹 중 일시정지 hold가 오면 덕킹을 푼다(onResume이 덕킹 분기에서 돌아가 보관분을 영영 안 틀게 됨)
+  if (st.duck) { st.duck = null; rampOutGain(20); }
   console.info('[play] hold', gen, `${bufs.reduce((a, b) => a + b.duration, 0).toFixed(2)}s 보관`);
   render();
 }
@@ -1232,8 +1254,48 @@ function sendPlayback(state) {
 
 // 재생 중 250 ms마다 위치 보고. hold 중(st.held)에는 멈춘다(위치 고정), resume 뒤 다시.
 setInterval(() => {
-  if (st.wsOpen && st.pbState === 'speaking' && !st.held && playing()) sendPlayback('speaking');
+  // ctx가 running이 아니면(interrupted·suspended) 위치가 멈춰 있으므로 보내지 않는다(서버가 가짜 재생 지연으로 봄)
+  if (st.wsOpen && st.pbState === 'speaking' && !st.held && playing() && st.ctx && st.ctx.state === 'running') sendPlayback('speaking');
 }, 250);
+
+// ctx가 running이 아닐 때 감시(0.5초마다).
+// - 재생 정리: 멈춘 컨텍스트의 예약 소스는 onended가 오지 않아 playing()이 true로 남는다(위치 보고 고정,
+//   playGuard·반이중이 마이크를 막음). CTX_DOWN_STOP_MS 넘게 이어지면 재생을 버리고 idle을 보고한다.
+// - 자동 재개: 대화 중 화면에 보이는데 중단 뒤 suspended로 남으면 sysHoldWhy가 계속 'ctx suspended'라
+//   아무것도 안 풀린다. CTX_WAKE_EVERY_MS마다 resume()을 시도하고, 마지막 시도는 wakeContext(재생성 포함).
+const CTX_DOWN_STOP_MS = 3000;
+const CTX_WAKE_DELAY_MS = 1000; // suspended가 된 직후(복구 중 suspend→resume 등)는 건드리지 않는다
+const CTX_WAKE_EVERY_MS = 2000;
+const CTX_WAKE_MAX = 5;
+setInterval(() => {
+  const ctx = st.ctx;
+  const now = performance.now();
+  if (!ctx || ctx.state === 'running' || ctx.state === 'closed') {
+    st.ctxDownSince = 0;
+    st.ctxWakeTries = 0;
+    st.ctxWakeAt = 0;
+    return;
+  }
+  if (!st.ctxDownSince) st.ctxDownSince = now;
+  const down = now - st.ctxDownSince;
+  if (st.sources.size && down > CTX_DOWN_STOP_MS) {
+    diag(`[play] ctx ${ctx.state} ${(down / 1000).toFixed(1)}초: 멈춘 재생 ${st.sources.size}개 버리고 idle 보고`, 'warn');
+    stopPlayback();
+    render();
+  }
+  if (ctx.state !== 'suspended' || !st.conv || document.hidden || st.ctxPending || st.convStarting
+    || st.recovering || st.micFix || down < CTX_WAKE_DELAY_MS) return;
+  if (st.ctxWakeTries >= CTX_WAKE_MAX || now - st.ctxWakeAt < CTX_WAKE_EVERY_MS) return;
+  st.ctxWakeAt = now;
+  st.ctxWakeTries++;
+  const last = st.ctxWakeTries >= CTX_WAKE_MAX;
+  diag(`[audio] 대화 중 ctx suspended ${(down / 1000).toFixed(1)}초: 자동 재개 ${st.ctxWakeTries}/${CTX_WAKE_MAX}${last ? '(재생성 포함)' : ''}`);
+  const p = last ? wakeContext(600) : withTimeout(ctx.resume(), 1000);
+  p.catch(() => {}).then(() => {
+    // 재생성됐으면 캡처 그래프가 옛 컨텍스트에 있다: recoverMic이 다시 잇는다(running이 된 경우만)
+    if (st.conv && st.ctx && st.ctx.state === 'running' && !document.hidden) recoverMic();
+  });
+}, 500);
 
 function stopPlayback() {
   for (const s of st.sources) {
@@ -1256,7 +1318,15 @@ function stopLocal(newGen = null) {
   if (st.gen >= 0) st.deadGens.add(st.gen);
   if (st.deadGens.size > 50) st.deadGens = new Set([...st.deadGens].slice(-20));
   stopPlayback();
-  if (typeof newGen === 'number' && newGen !== st.gen && !st.deadGens.has(newGen)) st.gen = newGen;
+  if (typeof newGen === 'number' && newGen !== st.gen && !st.deadGens.has(newGen)) {
+    // 서버 interrupt가 새 generation을 알려 준다. 뒤이은 speak_start(newGen)는 같은 gen이라 초기화를 건너뛰므로
+    // 여기서 onSpeakStart의 새 generation 초기화를 같이 한다(안 하면 옛 genStarted 때문에 첫 청크가 재버퍼됨).
+    st.gen = newGen;
+    st.pbBaseMs = 0;
+    st.rxSec = 0;
+    st.genStarted = false;
+    st.underruns = 0;
+  }
   st.speakEnded = true;
   if (st.botEl) {
     if (st.botEl.classList.contains('typing')) st.botEl.remove();
@@ -1286,6 +1356,7 @@ function newContext() {
     if (ctx.state === 'interrupted') noteAway();
     else if (ctx.state === 'running') noteBack(`ctx ${ctx.state}`);
     checkSysHold();
+    if (ctx === st.ctx && ctx.state === 'running') micAfterHold(`ctx ${ctx.state}`);
   };
   st.ctx = ctx;
   ensureOutput(ctx);
@@ -1319,7 +1390,7 @@ async function recoverContext() {
   disconnectCapture();
   stopKeepAlive();
   st.outBus = st.analyser = st.outGain = st.limiter = st.earBus = null;
-  try { ctx.onstatechange = null; ctx.close(); } catch { /* */ }
+  try { ctx.onstatechange = null; ctx.close().catch(() => {}); } catch { /* */ }
   const fresh = newContext(); // ensureOutput 포함
   diag(`[audio] 새 컨텍스트 ${fresh.state}`);
   if (st.conv) startKeepAlive();
@@ -1522,8 +1593,16 @@ function watchTrack(track) {
   track.onended = () => {
     diag('[mic] track ended', 'warn');
     if (st.listening) abortListening();
-    // 대화 중이고 화면에 보이면 제스처 없이 다시 받아 본다. 숨겨져 있으면 복귀 때 처리.
-    if (st.conv && !document.hidden) recoverMic();
+    // 시스템 중단(ctx interrupted·suspended) 중이면 지금 getUserMedia는 실패해 대화가 끝난다:
+    // 표시만 해 두고 중단이 풀릴 때(checkSysHold 해제·ctx running) 다시 받는다.
+    const why = sysHoldWhy();
+    if (st.conv && why) {
+      st.trackEndedDuringHold = true;
+      diag(`[mic] 중단 중 트랙 ended(${why}): 복귀 때 다시 받음`);
+    } else if (st.conv && !document.hidden) {
+      // 대화 중이고 화면에 보이면 제스처 없이 다시 받아 본다. 숨겨져 있으면 복귀 때 처리.
+      recoverMic();
+    }
     render();
   };
 }
@@ -1773,8 +1852,18 @@ function checkSysHold(now = performance.now()) {
     st.zeroFailed = false;
     if (st.micNote === NOTE_SYSMUTE || st.micNote === NOTE_RETRY || st.micNote === NOTE_DEAD) setMicNote('');
     diag(`[mic] 음소거 해제·복귀: 무음 복구 다시 허용(보류 ${(ms / 1000).toFixed(1)}초${wasFailed ? ', 실패 표시 해제' : ''}), ${micDesc()}`);
+    micAfterHold('보류 해제');
   }
   return false;
+}
+
+// 시스템 중단이 풀린 뒤: 중단 중 트랙이 ended됐거나 지금 트랙이 live가 아니면 다시 받는다(제스처 없이).
+function micAfterHold(why) {
+  if (!st.conv || document.hidden || st.convStarting || st.micFix || sysHoldWhy()) return;
+  if (!st.trackEndedDuringHold && micAlive()) return;
+  st.trackEndedDuringHold = false;
+  diag(`[mic] 중단 해제(${why}): 마이크 다시 연결, ${micDesc()}`);
+  recoverMic();
 }
 
 // 큐에 남은 재생 시간(초): 예약된 소스의 끝(st.nextTime) - ctx.currentTime
@@ -2066,6 +2155,9 @@ function resetConvState() {
   st.zeroSince = 0;
   st.holdSince = 0;
   st.holdEndAt = 0;
+  st.trackEndedDuringHold = false;
+  st.ctxWakeTries = 0;
+  st.ctxWakeAt = 0;
   st.stallTried = false;
   st.vadSpeech = false;
   st.emptyN = 0;
@@ -2129,7 +2221,7 @@ function armMicWatch() {
   const t0 = performance.now();
   st.micWatch = setTimeout(() => {
     st.micWatch = 0;
-    if (st.conv && !st.micMuted && st.lastPcmAt < t0) fixMic('시작 뒤 1.5초');
+    if (st.conv && !st.micMuted && st.lastPcmAt < t0 && !st.holdSince && !sysHoldWhy()) fixMic('시작 뒤 1.5초');
   }, MIC_WATCH_MS);
   // running인데 0.6초 동안 currentTime이 그대로면 1.5초를 기다리지 않고 바로 새 컨텍스트로
   const ctx0 = st.ctx;
@@ -2137,6 +2229,7 @@ function armMicWatch() {
   st.ctWatch = setTimeout(() => {
     st.ctWatch = 0;
     if (!st.conv || st.micMuted || st.micFix || st.ctx !== ctx0 || !ctx0 || ctx0.state !== 'running') return;
+    if (st.holdSince || sysHoldWhy()) return; // 시스템 음소거 중
     if (ctx0.currentTime > ct0 || playing() || st.lastLevelAt >= t0) return;
     clearTimeout(st.micWatch);
     st.micWatch = 0;
@@ -2167,7 +2260,10 @@ async function waitPcm(t, ms, alive) {
 
 async function runMicFix(why, frozen = false) {
   const seq = st.convSeq;
-  const alive = () => st.conv && st.convSeq === seq && !st.micMuted;
+  // runZeroFix와 같은 외부 중단 조건: 도중에 시스템 음소거·ctx interrupted가 오면 조용히 그만둔다
+  // (중단 중 컨텍스트 재생성·트랙 재획득은 헛돌고 실패만 남긴다. 복귀 때 다시 판정)
+  const extHold = () => { const t = micTrack(); return (t && t.readyState === 'live' && t.muted) || (st.ctx && st.ctx.state === 'interrupted'); };
+  const alive = () => st.conv && st.convSeq === seq && !st.micMuted && !extHold();
   if (!alive()) return;
   // 컨텍스트 시간이 멈췄으면(running인데 0.5초 동안 currentTime 그대로) 1·2단계는 소용없다 → 바로 3단계
   if (!frozen && !playing()) {
@@ -2230,6 +2326,8 @@ async function runMicFix(why, frozen = false) {
 // 대화 중 무프레임 감시(1초마다). 화면이 숨겨진 동안은 iOS가 캡처를 멈추므로 보지 않는다.
 setInterval(() => {
   if (!st.conv || st.micFix || st.stallTried || st.convStarting || document.hidden) return;
+  // 시스템 음소거·중단 중에는 프레임이 없는 게 정상: 사다리를 돌리지 않고 기회(stallTried)도 아낀다
+  if (st.holdSince || sysHoldWhy()) { st.capStartAt = performance.now(); return; }
   if (!micSending()) return;
   const now = performance.now();
   if (now - Math.max(st.lastPcmAt, st.capStartAt) > MIC_STALL_MS) {
@@ -2305,7 +2403,7 @@ function setMicMuted(on) {
 function setSoundOff(on) {
   st.soundOff = !!on;
   const v = st.soundOff ? 0 : 1;
-  if (st.outGain) st.outGain.gain.setValueAtTime(outGainValue(), st.outGain.context.currentTime);
+  rampOutGain(10); // 진행 중인 덕킹 램프를 취소하고 맞춘다(setValueAtTime만 하면 램프가 덮어씀)
   if (st.earBus) st.earBus.gain.setValueAtTime(v, st.earBus.context.currentTime);
 }
 
@@ -2410,7 +2508,7 @@ for (const b of el.boostBtns) {
   b.addEventListener('click', () => {
     st.boost = hvBoost(b.dataset.boost);
     localStorage.setItem(LS.boost, String(st.boost));
-    if (st.outGain) st.outGain.gain.setValueAtTime(outGainValue(), st.outGain.context.currentTime);
+    rampOutGain(10); // 진행 중인 덕킹 램프를 취소하고 맞춘다
     render();
   });
 }
@@ -2558,7 +2656,9 @@ function onForeground(why) {
   if (document.hidden) return;
   render();
   if (st.recovering) return;
-  st.recovering = recoverAll(why).finally(() => { st.recovering = null; });
+  st.recovering = recoverAll(why)
+    .catch((e) => diag(`[audio] 복귀 오류 ${e && e.name} ${e && e.message}`, 'warn'))
+    .finally(() => { st.recovering = null; });
 }
 
 async function recoverAll(why) {

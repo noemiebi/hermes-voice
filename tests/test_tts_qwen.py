@@ -531,3 +531,16 @@ def test_session_turn_seed(tmp_path):
     assert reqs == ["끔 하나", "첫 문장", "둘째 문장", "다음 답"]
     assert 1 not in sd                                           # 꺼져 있을 때 첫 요청(id 1)은 seed 없음
     assert sd[2] == sd[3] and 4 in sd                            # 같은 답의 두 문장은 같은 seed, 다음 답도 seed 있음
+
+
+def test_fade_in_carries_across_chunks():
+    # 소리가 첫 청크 끝에서 시작해도 페이드인 전체 길이가 다음 청크로 이어져 적용된다
+    sr = 24000
+    y = np.concatenate([np.zeros(1000), np.full(5000, 0.5)]).astype(np.float32)
+    whole = QwenPostProcessor(sr, gain_db=0.0, out_rate=sr)
+    split = QwenPostProcessor(sr, gain_db=0.0, out_rate=sr)
+    a = whole._finish(y)
+    b = np.concatenate([split._finish(y[:1010]), split._finish(y[1010:3000]), split._finish(y[3000:])])
+    assert whole.fade_in_n > 100
+    assert np.array_equal(a, b)
+    assert abs(int(b[1000 + whole.fade_in_n // 2]) - 0.25 * 32767) < 200   # 램프 중간은 절반 크기

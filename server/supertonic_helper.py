@@ -112,8 +112,9 @@ class UnicodeProcessor:
         return text_mask
 
     def _text_to_unicode_values(self, text: str) -> np.ndarray:
+        # uint16 밖(U+FFFF 초과: 국기 태그 문자·CJK 확장 B 등)은 OverflowError로 문장 전체가 빠지므로 버린다
         unicode_values = np.array(
-            [ord(char) for char in text], dtype=np.uint16
+            [ord(char) for char in text if ord(char) <= 0xFFFF], dtype=np.uint16
         )  # 2 bytes
         return unicode_values
 
@@ -121,7 +122,7 @@ class UnicodeProcessor:
         self, text_list: list[str], lang_list: list[str]
     ) -> tuple[np.ndarray, np.ndarray]:
         text_list = [
-            self._preprocess_text(t, lang) for t, lang in zip(text_list, lang_list)
+            _strip_non_bmp(self._preprocess_text(t, lang)) for t, lang in zip(text_list, lang_list)
         ]
         text_ids_lengths = np.array([len(text) for text in text_list], dtype=np.int64)
         text_ids = np.zeros((len(text_list), text_ids_lengths.max()), dtype=np.int64)
@@ -132,6 +133,11 @@ class UnicodeProcessor:
             )
         text_mask = self._get_text_mask(text_ids_lengths)
         return text_ids, text_mask
+
+
+def _strip_non_bmp(text: str) -> str:
+    """U+FFFF 초과 문자를 지운다(길이·마스크가 _text_to_unicode_values 결과와 맞도록 미리)."""
+    return "".join(c for c in text if ord(c) <= 0xFFFF)
 
 
 class Style:

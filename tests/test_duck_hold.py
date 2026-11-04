@@ -76,14 +76,15 @@ def test_duck_no_drop_interrupts():
     async def go():
         s, ws, stt, hermes, gen = await setup_duck()
         await hold_now(s)
-        await feed(s, -43, 576, seed=60)          # 줄여도 그대로 -> 사용자 말
-        assert ws.of("interrupt") == [{"type": "interrupt", "generation": gen + 1}]
-        assert not ws.of("resume") and not s.holding
-        # 발화는 계속 수집되다가 끝에서 평소처럼 턴
+        await feed(s, -43, 576, seed=60)          # 줄여도 그대로 -> 사용자 말 쪽: 바로 끊지 않고 일시정지
+        assert pauses(ws) == [{"type": "hold", "generation": gen}]
+        assert not ws.of("interrupt") and not ws.of("resume") and s.holding and s._hold_mode == "pause"
+        # 말 끝 STT가 진짜 말 -> 그때 끼어들기 + 새 턴
         stt.text = "잠깐 그만"
         s.endpointer.in_speech = False
         await s._on_vad(VADEvent("end", pcm=b"\0\0" * 16000, speech_ms=900))
         await settle()
+        assert ws.of("interrupt") and not ws.of("resume")
         assert stt.calls == 1 and ws.of("transcript")
         s.speaker_task.cancel()
     asyncio.run(go())
@@ -140,13 +141,18 @@ def chunk_levels(dbs, seed=0):
     return (np.clip(a, -1, 1) * 32767).astype("<i2").tobytes()
 
 
+def pauses(ws):
+    """덕킹 hold에서 바뀐 일시정지 hold 메시지(mode 없음)."""
+    return [m for m in ws.of("hold") if "mode" not in m]
+
+
 async def feed_until(s, ws, dbs_per_chunk, kind, limit_chunks=10):
     """조각을 보내며 kind 메시지가 나올 때까지 걸린 hold 뒤 시간(s)."""
     at = s._hold_at
     for i in range(limit_chunks):
         s.clock.t += 0.096
         await s._on_audio(chunk_levels(dbs_per_chunk, seed=100 + i))
-        if ws.of(kind):
+        if (pauses(ws) if kind == "pause" else ws.of(kind)):
             return s.clock.t - at
     return None
 
@@ -166,9 +172,9 @@ def test_duck_early_interrupt():
     async def go():
         s, ws, stt, hermes, gen = await setup_duck()
         await hold_now(s)
-        took = await feed_until(s, ws, [-43, -43, -43], "interrupt")
+        took = await feed_until(s, ws, [-43, -43, -43], "pause")
         assert took is not None and took <= 0.31, took
-        assert not ws.of("resume")
+        assert not ws.of("resume") and not ws.of("interrupt")
         s.speaker_task.cancel()
     asyncio.run(go())
 
@@ -415,7 +421,10 @@ def test_duck_echo_long_rest_rechecks():
         assert len(ws.of("hold")) == 1
         await feed_playing(s, gen, -44, 960, seed=240)  # 복귀 뒤 900 ms 넘게 이어짐 -> 덕킹 재검사
         assert len(ws.of("hold")) == 2 and s.holding
-        await feed_playing(s, gen, -43, 384, seed=250)  # 줄여도 그대로 -> 사용자 말, 끼어들기 확정
+        await feed_playing(s, gen, -43, 384, seed=250)  # 줄여도 그대로 -> 사용자 말 쪽: 일시정지
+        assert pauses(ws) and s.holding and s._hold_mode == "pause"
+        s.endpointer.speech_ms += 1000                   # 멈춘 뒤에도 말이 900 ms 넘게 이어짐 -> 끼어들기 확정
+        await feed(s, -30, 192, seed=255)
         assert ws.of("interrupt") and not s.holding and s._duck_echo is None
         s.speaker_task.cancel()
     asyncio.run(go())
@@ -606,8 +615,11 @@ def test_duck_loud_user_over_expected_interrupts():
         s, ws, stt, hermes, gen = await setup_duck()
         await hold_with(s, [-16, -16, -16], expected_db=-37.0)
         await feed(s, -9, 576, seed=320)
-        assert ws.of("interrupt") == [{"type": "interrupt", "generation": gen + 1}]
+        assert pauses(ws) == [{"type": "hold", "generation": gen}]
         assert not ws.of("resume")
+        s.endpointer.speech_ms += 1000             # 멈춘 뒤에도 계속 말함 -> 끼어들기 확정
+        await feed(s, -9, 192, seed=325)
+        assert ws.of("interrupt") == [{"type": "interrupt", "generation": gen + 1}]
         s.speaker_task.cancel()
     asyncio.run(go())
 
@@ -617,7 +629,7 @@ def test_duck_post_silent_windows_excluded():
     async def go():
         s, ws, stt, hermes, gen = await setup_duck()
         await hold_with(s, [-44, -44, -44])
-        took = await feed_until(s, ws, [-43, -180, -43], "interrupt")
+        took = await feed_until(s, ws, [-43, -180, -43], "pause")
         assert took is not None and not ws.of("resume")
         s.speaker_task.cancel()
     asyncio.run(go())
@@ -739,4 +751,21 @@ def test_aec_prior_loaded_on_hello_and_saved(tmp_path):
         s.clock.t += 31.0
         s._maybe_save_aec()
         assert s.aec_store.load(key)["lag_ms"] == 160.0
+    asyncio.run(go())
+
+
+def test_duck_user_verdict_echo_after_pause_resumes():
+    """덕킹 검사가 '사용자 말 쪽'이어도 바로 끊지 않는다: 일시정지 뒤 말 끝 STT가 에코면 보관분을 이어 재생."""
+    async def go():
+        s, ws, stt, hermes, gen = await setup_duck()
+        s.echo.add("잠깐 확인해 볼게요.")
+        await hold_now(s)
+        await feed(s, -43, 576, seed=360)
+        assert pauses(ws) and s._hold_mode == "pause"
+        stt.text = "잠깐 확인해 볼게요."
+        s.endpointer.in_speech = False
+        await s._on_vad(VADEvent("end", pcm=b"\0\0" * 16000, speech_ms=700))
+        await settle()
+        assert ws.of("resume") and not ws.of("interrupt") and not s.holding
+        s.speaker_task.cancel()
     asyncio.run(go())

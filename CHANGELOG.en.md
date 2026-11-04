@@ -4,6 +4,55 @@ English · [한국어](CHANGELOG.md)
 
 What changed in each version, and why. Each entry follows symptom → cause → change. "App vNN" is the web app's service worker version; reopening the home-screen app picks up the new version. Entries that only touch the server are marked **(server)** and take effect after a server restart. Defaults and meanings of environment variables are in the [README](README.en.md#environment-variables-env).
 
+## 0.8.0 (2026-11-04) — app v53
+
+Bug-fix release.
+
+**One sentence split into several turns (server)**
+Pausing briefly mid-sentence split it into several turns that cut each other off, and the earlier request was lost ('오늘 일정 요약해주고' → '오늘' → …). The window for merging with the previous utterance only covered the time it was being transcribed (about 0.3 s). Now, if you keep talking within 2 s (`TURN_MERGE_WINDOW_S`) after the previous utterance ended and before the reply (first token or audio) has started, the new speech is merged with the previous utterance and transcribed together instead of counting as a barge-in. If the transcript looks unfinished (a connective ending such as '…하고'/'…는데', or a short fragment like '오늘'), the server waits another 0.7 s (`TURN_CONTINUE_WAIT_MS`) and merges what follows. The merged transcript replaces your last bubble and history item (`transcript.replace_last`, `log.replace_last`).
+
+**Follow-up questions discarded as echo (server)**
+Questions that repeat words from the answer ('…나오냐고', '…뭐야') were discarded as echo. The global similarity rule ("long, nearly identical sentence") applied regardless of playback and ignored question endings. Now speech with a question or request ending that is not in the answer is never treated as echo, and when nothing is playing, two or more words not in the answer mark it as the user's speech. The global rule only applies to speech that started during playback or within 1.5 s after it ended (`ECHO_GLOBAL_WINDOW_S`).
+
+**Answer cut off by a wrong duck-test verdict (server)**
+The duck test confirmed the assistant's own voice as "user speech" and cut the answer off (3 of 6 field cases). Now it does not cut right away: it switches to a pause `hold` to remove the echo, then barges in if the speech keeps going (`HOLD_CONFIRM_MS`) or the end-of-utterance STT is real speech, and resumes playback if it was echo. The 900 ms confirmation during ducking works the same way.
+
+**Fillers always polite on the first turn (server)**
+The filler register was based only on answer sentences, and casual endings like '…냐고/…고' were not recognized, so the first turn always used polite speech. With no answer to go on, fillers now follow the register of the user's speech.
+
+**New turns after disconnect (server)**
+After the connection dropped or the conversation was turned off, a pending decision could still start a new turn (a Hermes request). Pending decision tasks are now cancelled on disconnect and on turn-off.
+
+**Stability (server)**
+- If the speaker task died from an exception, the session could not speak again. Exceptions are now handled per sentence and the task logs when it exits.
+- A new turn did not cancel the previous one, so fillers could get tangled. Fixed.
+- Overall time limit for a Hermes response (`HERMES_TURN_MAX_S`, default 180 s); when exceeded, the turn ends with an error.
+- History is saved off the event loop (batched over 0.5 s).
+- The "heard so far" part of an interrupted-answer note is based on the actual playback position.
+
+**No Tailscale path logs (server)**
+Not a single Tailscale path log line was written. launchd provides no `TERM`, so the Tailscale app binary tried to start as the app instead of the CLI and failed. The server now passes `TERM`, cleans up the child process, and logs the reason for the first failure.
+
+**Slow first sound after barge-in**
+Right after a barge-in, the first sound of the next answer could come up to 2.5 s late. Rebuffer state was not reset when switching to a new generation, and the first answer sentence after a filler was also treated as a "stall" and rebuffered. Now the state is reset on switch, and if the queue is empty at a sentence start, playback starts immediately.
+
+**Stuck after an iOS interruption**
+If the mic track ended during an iOS interruption (phone call, Siri, etc.), it did not reconnect after the interruption ended; and if audio stayed suspended, only the "돌아오면 자동으로 이어집니다" (resumes automatically when you return) notice appeared and nothing happened. Now the mic reconnects when the interruption ends, a suspended context is resumed automatically (every 2 s, up to 5 times), the recovery ladder does not run during an interruption, and stalled playback is cleared after 3 s and stops reporting position.
+
+**Other app fixes**
+The mute and volume buttons were overridden by the duck ramp while it ran. Fixed. Unhandled Promise rejections cleaned up.
+
+**TTS reading (server)**
+Fixed number and symbol reading errors.
+- '3~5도' was read as '35도' (sentence cleanup removed `~`). '3~5개' was read as '3에서 다섯 개'; now '세 개에서 다섯 개'.
+- In time ranges like '10:00~12:00', '에서' was dropped; now '열 시에서 열두 시'. '24:00' is handled too.
+- Hours 13–24 were read with native Korean numerals ('스무 시'); now '20:30' → '20시 30분'.
+- '2번 출구', '1번 고객님' and '4대 보험' were read with native numerals as if they were counts. Now '2번 출구' stays as is, while a real count such as '4번 했어요' is still read '네 번 했어요'.
+- '7시30분' written without a space was not handled; now '일곱 시 30분'.
+- The year was dropped from a leading '2026. 11. 4.', and the underscore in 'my_file' was removed. Fixed.
+- A single non-emoji special character (such as 𠀀) made the whole sentence drop out silently. Fixed.
+- The Qwen sentence-start fade-in got shorter at chunk boundaries. Fixed.
+
 ## 0.7.0 (2026-11-03) — app v52
 
 **Keeping and logging the Tailscale path (server)**

@@ -7,10 +7,13 @@ import re
 _RE_CODE_FENCE = re.compile(r"```[^\n]*\n?")
 _RE_LINK = re.compile(r"\[([^\]]*)\]\([^)]*\)")
 _RE_URL = re.compile(r"https?://\S+|www\.\S+")
-_RE_BULLET = re.compile(r"(?m)^\s*(?:[-*+•]|\d+[.)])\s+")
+# 번호 목록은 1~2자리 + . 또는 ) + 공백 + 숫자 아닌 글자일 때만(2026. 11. 4. 같은 날짜는 그대로)
+_RE_BULLET = re.compile(r"(?m)^\s*(?:[-*+•]|\d{1,2}[.)](?=\s+\D))\s+")
+_RE_INLINE_ITEM = re.compile(r"(?<=\s)\d{1,2}\)\s+(?=[^\d\s])")   # 문장 안 "1) 사과 2) 배"의 2)
 _RE_HEADING = re.compile(r"(?m)^\s*#{1,6}\s*")
 _RE_QUOTE = re.compile(r"(?m)^\s*>\s?")
-_RE_SYMBOLS = re.compile(r"[*_`#~|<>\[\]{}\\]")
+# ~ < > _ 는 지우지 않는다(3~5도·10:00~12:00·my_file 등은 tts_text가 읽는 법을 정한다)
+_RE_SYMBOLS = re.compile(r"[*`#|\[\]{}\\]")
 _RE_EMOJI = re.compile(
     "[\U0001F000-\U0001FAFF\U00002600-\U000027BF\U0001F900-\U0001F9FF\U00002B00-\U00002BFF️‍]")
 _RE_SPACES = re.compile(r"[ \t]+")
@@ -23,6 +26,7 @@ def clean_for_speech(text: str) -> str:
     t = _RE_HEADING.sub("", t)
     t = _RE_QUOTE.sub("", t)
     t = _RE_BULLET.sub("", t)
+    t = _RE_INLINE_ITEM.sub("", t)
     t = _RE_SYMBOLS.sub("", t)
     t = _RE_EMOJI.sub("", t)
     t = _RE_SPACES.sub(" ", t)
@@ -65,7 +69,9 @@ class SentenceSplitter:
             out += self._emit(piece)
         # 부호 없이 너무 길어지면 쉼표·공백에서 자름
         while len(self.buf) > self.max_chars:
-            cut = max(self.buf.rfind(", ", 0, self.max_chars), self.buf.rfind(" ", 0, self.max_chars))
+            cut = self.buf.rfind(", ", 0, self.max_chars)   # 쉼표가 충분히 뒤쪽에 있으면 쉼표 우선
+            if cut < self.max_chars // 2:
+                cut = self.buf.rfind(" ", 0, self.max_chars)
             if cut < self.max_chars // 2:
                 cut = self.max_chars
             piece, self.buf = self.buf[: cut + 1], self.buf[cut + 1:]

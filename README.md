@@ -134,6 +134,7 @@ curl -s http://127.0.0.1:8480/health
 | `HERMES_API_KEY` | (빈 값) | **필수.** Hermes API 서버 키(`extra.key` / `API_SERVER_KEY`). 세션 이어가기에도 필요 |
 | `HERMES_MOCK` | (빈 값) | `1`이면 Hermes 대신 가짜 스트림(도구 시작 이벤트 1회 포함) |
 | `HERMES_REASONING` | `off` | `voice-fast` 요청의 추론 단계: `off`·`minimal`·`low`·`medium`·`high`, `default`면 Hermes 설정값. `voice-deep`에는 안 붙임. 측정 도구 `tests/bench_hermes.py` |
+| `HERMES_TURN_MAX_S` | `180` | 한 턴의 헤르메스 응답 전체 시한(초). 넘으면 오류로 턴을 끝냄 |
 | `AGENT_NAME` | `Herbot` | 화면과 말투에 쓰는 대화 상대 이름 |
 | `MODEL_LABEL_FAST` / `MODEL_LABEL_DEEP` | (빈 값) | 설정 시트의 빠름·깊게 아래에 보일 실제 모델 이름(예: `Claude Sonnet 5.5`). 설정하면 매 턴 모델에게도 알려 준다. 비우면 생략 |
 | `VOICE_TOKEN` | (빈 값 = 인증 없음) | 접속 토큰. Tailscale 밖(공개망)에 열면 **필수** |
@@ -205,10 +206,13 @@ curl -s http://127.0.0.1:8480/health
 | `SMART_TURN_SILENCE_MS` | `300` | smart-turn: 이만큼 조용하면 모델에 묻고, 완료면 바로 말 끝(아니면 `VAD_END_SILENCE_MS`까지 기다림) |
 | `SMART_TURN_THRESHOLD` | `0.5` | smart-turn 완료 확률 기준 |
 | `SMART_TURN_MODEL` | `models/smart-turn-v3.2-cpu.onnx` | 모델 경로(없으면 경고 후 침묵 기준만 씀) |
+| `TURN_MERGE_WINDOW_S` | `2.0` | 앞 발화가 끝난 뒤 이 시간(초) 안에, 답(첫 토큰·오디오)이 나오기 전에 이어 말하면 끼어들기 대신 앞 발화와 합쳐 받아씀 |
+| `TURN_CONTINUE_WAIT_MS` | `700` | 받아쓴 말이 덜 끝난 듯하면(연결 어미 '…하고/…는데', '오늘' 같은 짧은 조각) 이만큼 더 기다려 이어지는 말을 합침. `0`이면 끔 |
 | `SILERO_VAD_MODEL` | 설치된 `silero_vad/data/silero_vad.onnx` | VAD 모델 경로 |
 | `PITCH_GATE` | `1` | 재생 중 말 시작 때 앞부분 400 ms의 음높이(F0)가 TTS 음역이면 에코로 보고 덕킹 생략, 사용자 음역이면 바로 끼어들기(음역 프로필 `VOICE_DATA_DIR/voice_profile.json`, 사용자 5발화부터). `0`이면 끔 |
 | `DUCK_SKIP_CORR` | `0.7` | 재생 중 말 시작 때 최근 대조 창 corr 중앙값이 이 이상(그리고 레벨 조건)이면 확실한 에코로 보고 덕킹 검사 없이 재생 유지. `0`이면 끔 |
 | `DUCK_SKIP_LEVEL_DB` | `4` | 덕킹 생략 레벨 조건: 최근 창 mic_db 중앙값이 expected_db 중앙값 + 이 값 이하일 때만 |
+| `ECHO_GLOBAL_WINDOW_S` | `1.5` | '길고 거의 같은 문장' 전역 에코 규칙을 재생 중이거나 재생이 끝난 뒤 이 시간(초) 안에 시작된 말에만 적용 |
 
 스피커 에코 대책 관련 값(`HOLD_*`, `ECHO_*`, `DUCK_*` 등)은 `server/config.py`와 `docs/프로토콜.md` '스피커 에코 대책'을 보세요.
 

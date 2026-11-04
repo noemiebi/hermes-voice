@@ -134,6 +134,7 @@ Path variables fall back to their defaults when left empty.
 | `HERMES_API_KEY` | (empty) | **Required.** Hermes API server key (`extra.key` / `API_SERVER_KEY`). Also needed to continue sessions |
 | `HERMES_MOCK` | (empty) | `1` uses a fake stream instead of Hermes (includes one tool-start event) |
 | `HERMES_REASONING` | `off` | Reasoning level for `voice-fast` requests: `off`, `minimal`, `low`, `medium`, `high`; `default` uses the Hermes setting. Not applied to `voice-deep`. Benchmark tool: `tests/bench_hermes.py` |
+| `HERMES_TURN_MAX_S` | `180` | Overall time limit (s) for one turn's Hermes response. When exceeded, the turn ends with an error |
 | `AGENT_NAME` | `Herbot` | Assistant name used on screen and in its speech |
 | `MODEL_LABEL_FAST` / `MODEL_LABEL_DEEP` | (empty) | Actual model names shown under Fast/Deep in the settings sheet (e.g. `Claude Sonnet 5.5`). When set, the model is also told this on every turn. Omitted if empty |
 | `VOICE_TOKEN` | (empty = no auth) | Access token. **Required** if exposed outside Tailscale (on the public internet) |
@@ -205,10 +206,13 @@ Path variables fall back to their defaults when left empty.
 | `SMART_TURN_SILENCE_MS` | `300` | smart-turn: after this much silence, ask the model; if complete, end the turn immediately (otherwise wait until `VAD_END_SILENCE_MS`) |
 | `SMART_TURN_THRESHOLD` | `0.5` | smart-turn completion probability threshold |
 | `SMART_TURN_MODEL` | `models/smart-turn-v3.2-cpu.onnx` | Model path (if missing, logs a warning and uses the silence rule only) |
+| `TURN_MERGE_WINDOW_S` | `2.0` | If you keep talking within this many seconds after the previous utterance ended, before the reply (first token or audio) has started, the new speech is merged with the previous utterance and transcribed together instead of being treated as a barge-in |
+| `TURN_CONTINUE_WAIT_MS` | `700` | If the transcript looks unfinished (a connective ending such as '…하고'/'…는데', or a short fragment like '오늘'), wait this much longer and merge whatever follows. `0` disables |
 | `SILERO_VAD_MODEL` | the installed `silero_vad/data/silero_vad.onnx` | VAD model path |
 | `PITCH_GATE` | `1` | When speech starts during playback, look at the pitch (F0) of its first 400 ms: in the TTS voice's range it is treated as echo and the duck test is skipped; in the user's range it barges in right away (voice profile in `VOICE_DATA_DIR/voice_profile.json`, used after 5 user utterances). `0` disables |
 | `DUCK_SKIP_CORR` | `0.7` | When speech starts during playback and the median echo-gate corr of recent windows is at least this (and the level condition holds), treat it as certain echo and keep playing without the duck test. `0` disables |
 | `DUCK_SKIP_LEVEL_DB` | `4` | Level condition for skipping the duck: median mic_db of recent windows must be at most median expected_db + this |
+| `ECHO_GLOBAL_WINDOW_S` | `1.5` | Apply the global echo rule for "long, nearly identical sentences" only to speech that started during playback or within this many seconds after it ended |
 
 For speaker-echo countermeasure settings (`HOLD_*`, `ECHO_*`, `DUCK_*`, etc.), see `server/config.py` and the "스피커 에코 대책" (speaker echo countermeasures) section of `docs/프로토콜.md` (Korean).
 

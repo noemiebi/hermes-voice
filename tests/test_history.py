@@ -126,5 +126,26 @@ def test_log_message_appends_to_current_session(tmp_path):
         await s._on_text(json.dumps({"type": "log", "item": it("안녕하세요", at=5)}))
         await s._on_text(json.dumps({"type": "log", "item": {"r": "bot", "t": ""}}))
         assert len(ws.msgs) == n  # 응답 없음
+        store.flush()  # 루프 안 저장은 디바운스(스레드)라 바로 씀
         assert HistoryStore(tmp_path / "h.json").items("sid-abc") == [{"r": "user", "t": "안녕하세요", "at": 5}]
     asyncio.run(go())
+
+
+def test_debounced_save_in_loop(tmp_path):
+    """이벤트 루프 안에서는 저장을 모아 스레드로 쓴다(루프를 fsync로 막지 않음)."""
+    import server.history as h
+    p = tmp_path / "h.json"
+    store = HistoryStore(p)
+
+    async def go():
+        for i in range(5):
+            store.append("a", it(f"m{i}", at=i))
+        assert not p.exists()  # 아직 디바운스 중
+        await asyncio.sleep(h.SAVE_DEBOUNCE_S + 0.3)
+        assert [x["t"] for x in HistoryStore(p).items("a")] == [f"m{i}" for i in range(5)]
+        store.append("a", it("마지막", at=9))
+    asyncio.run(go())
+    store.flush()  # 루프가 끝난 뒤 남은 변경도 flush로 씀
+    assert HistoryStore(p).items("a")[-1]["t"] == "마지막"
+    store.append("a", it("루프 밖", at=10))  # 루프 밖은 바로 동기 저장
+    assert HistoryStore(p).items("a")[-1]["t"] == "루프 밖"
